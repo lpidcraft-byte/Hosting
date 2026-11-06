@@ -6,6 +6,7 @@ import threading
 import time
 import re
 import logging
+import asyncio
 from pathlib import Path
 from flask import Flask, request
 
@@ -18,7 +19,7 @@ from telegram.ext import (
 # --- Ayarlar ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "9053394489:AAEMkxfOuDRVTcTY4mWluMgNdDbj-Y9ryMY")
 ADMIN_ID = 8913966694
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")  # Render otomatik verir
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 EMOJI_IDS = {
     "👋": 5454390891466726015, "👍": 5456267427102858366, "⚠": 5879449820338330922,
@@ -51,22 +52,6 @@ running_procs = {}
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# --- Flask ---
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
-@flask_app.route("/health")
-def health():
-    return "OK", 200
-
-@flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        bot_app.update_queue.put_nowait(update)
-        return "OK", 200
-    return "Method Not Allowed", 405
 
 # --- Yardımcılar ---
 def premium_button(text, callback_data, emoji="✅", style=None):
@@ -125,7 +110,7 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Handler'lar (öncekiyle aynı) ---
+# --- Handler'lar ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
@@ -250,35 +235,41 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
-# --- Uygulama ve Webhook Kurulumu ---
-bot_app = Application.builder().token(BOT_TOKEN).build()
+# --- Uygulama ve Handler Kayıtları ---
+application = Application.builder().token(BOT_TOKEN).build()
 
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
-bot_app.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
-bot_app.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
-bot_app.add_handler(CallbackQueryHandler(add_bot, pattern="^add_bot$"))
-bot_app.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
-bot_app.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
-bot_app.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
-bot_app.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
-bot_app.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
-bot_app.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
-bot_app.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token))
-bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-bot_app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-bot_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
+application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
+application.add_handler(CallbackQueryHandler(add_bot, pattern="^add_bot$"))
+application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
+application.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
+application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
+application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
+application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
+application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
+application.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token))
+application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+application.add_handler(PreCheckoutQueryHandler(pre_checkout))
+application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
+# --- Ana Çalıştırıcı ---
 if __name__ == "__main__":
+    # Python sürüm hatasını önlemek için event loop'u garantiye al
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     port = int(os.environ.get("PORT", 10000))
     
-    # Webhook URL'sini ayarla
+    # Webhook URL'sini ayarla (Render ortam değişkeninden gelir)
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
         logger.info(f"Webhook ayarlanıyor: {webhook_url}")
-        # PTB'nin kendi webhook başlatıcısını kullan
-        bot_app.run_webhook(
+        application.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=f"/webhook/{BOT_TOKEN}",
@@ -286,6 +277,6 @@ if __name__ == "__main__":
             drop_pending_updates=True
         )
     else:
-        # Lokal test için polling (Render'da RENDER_EXTERNAL_URL otomatik gelir)
-        logger.warning("RENDER_EXTERNAL_URL yok, polling modunda başlatılıyor (lokal test).")
-        bot_app.run_polling(drop_pending_updates=True)
+        # Eğer RENDER_EXTERNAL_URL environment değişkeni eklenmediyse polling'e düşer
+        logger.warning("RENDER_EXTERNAL_URL yok! Polling modunda başlatılıyor (Render'da çalışmaz).")
+        application.run_polling(drop_pending_updates=True)
