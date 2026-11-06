@@ -53,7 +53,6 @@ running_procs = {}
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Yardımcılar ---
 def premium_button(text, callback_data, emoji="✅", style=None):
     kw = {"text": text, "callback_data": callback_data}
     if emoji in EMOJI_IDS:
@@ -110,7 +109,7 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Handler'lar ---
+# --- Handler'lar (aynı) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
@@ -235,7 +234,7 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
-# --- Uygulama ve Handler Kayıtları ---
+# --- Uygulama ---
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
@@ -255,24 +254,31 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-# --- Webhook Modu ---
-async def run_webhook_async():
-    port = int(os.environ.get("PORT", 10000))
-    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-    logger.info(f"Webhook ayarlanıyor: {webhook_url}")
-    await application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=f"/webhook/{BOT_TOKEN}",
-        webhook_url=webhook_url,
-        drop_pending_updates=True
-    )
-
-# --- Ana Çalıştırıcı ---
+# --- Webhook / Polling Çalıştırıcı ---
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    
     if RENDER_URL:
-        # asyncio.run() kullanarak döngüyü temiz başlat
-        asyncio.run(run_webhook_async())
+        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+        logger.info(f"Webhook ayarlanıyor: {webhook_url}")
+        
+        # Döngüyü manuel oluşturup run_webhook'u bu döngü içinde çalıştırıyoruz
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # run_webhook zaten kendi içinde döngüyü yönetir, asyncio.run() kullanmıyoruz
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=f"/webhook/{BOT_TOKEN}",
+                webhook_url=webhook_url,
+                drop_pending_updates=True
+            )
+        finally:
+            # Döngüyü kapatmadan önce uygulamanın kapandığından emin ol
+            if not loop.is_closed():
+                loop.close()
     else:
         logger.warning("RENDER_EXTERNAL_URL yok! Polling modunda başlatılıyor.")
         application.run_polling(drop_pending_updates=True)
