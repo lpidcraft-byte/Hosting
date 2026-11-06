@@ -45,12 +45,13 @@ EMOJI_IDS = {
     "🌐": 5821388137443626414,
 }
 
+# Verileri tutacağımız dosya yolu
 DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
-# Yerel veri yükleme (Sistem verisi mesajı atılmayacak)
-def load_local_state():
+# Veriyi dosyadan yükle (Bot açılırken)
+def load_state():
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -58,13 +59,15 @@ def load_local_state():
         except: pass
     return {"users": {}, "premium": {}, "bot_codes": {}}
 
-def save_local_state():
+# Veriyi dosyaya kaydet (Sadece dosyaya yazar, mesaj ATMAAAAZ)
+def save_state():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(global_state, f, ensure_ascii=False)
-    except: pass
+            json.dump(global_state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Dosya kayıt hatası: {e}")
 
-global_state = load_local_state()
+global_state = load_state()
 running_procs = {}
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -139,14 +142,19 @@ def stop_bot_process(proc_key):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-    save_local_state()
+    save_state() # Dosyaya kaydet
     
     keyboard = []
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
     keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
-    await update.message.reply_text(f"👋 Merhaba {user.first_name}!\n\nBotunu çalıştırmak için '.py' dosyanı buraya gönder.", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    await update.message.reply_text(
+        f"👋 Merhaba {user.first_name}!\n\n"
+        f"Botunu çalıştırmak için '.py' dosyanı buraya gönder.", 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -237,7 +245,7 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if code and token:
         global_state["bot_codes"][user_id] = code
-        save_local_state()
+        save_state() # Veriyi dosyaya kaydet
         pk = start_bot_process(user_id, token, code)
         await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nİşlem No: `{pk}`", parse_mode="Markdown")
     else:
@@ -247,7 +255,7 @@ async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id == ADMIN_ID: await q.edit_message_caption("❌ Reddedildi.")
 
-# --- Premium ve Diğerleri ---
+# --- Premium Menüsü (Özellikler Eklendi) ---
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     keyboard = [
@@ -256,7 +264,16 @@ async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [premium_button("1 Yıllık - 100 ⭐", "premium_365", "💎", "primary")], 
         [premium_button("Geri", "back_start", "↩", "danger")]
     ]
-    await q.edit_message_text("💎 Premium Üyelik\n\nPaket seç:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    text = (
+        "💎 **Premium Üyelik Avantajları**\n\n"
+        "👑 Normal kullanıcılar sadece **1** bot çalıştırabilir.\n"
+        "⚡ Premium üyeler aynı anda **5** bot çalıştırabilir!\n"
+        "🚀 Sunucu kaynaklarında öncelik verilir.\n\n"
+        "Aşağıdan sana uygun paketi seçebilirsin:"
+    )
+    
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); uid = str(q.from_user.id); days = int(q.data.replace("premium_", ""))
@@ -272,7 +289,7 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message; parts = msg.successful_payment.invoice_payload.split("_")
     global_state["premium"][parts[1]] = time.time() + int(parts[2]) * 86400
-    save_local_state()
+    save_state() # Veriyi dosyaya kaydet
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
