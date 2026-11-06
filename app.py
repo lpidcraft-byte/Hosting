@@ -255,28 +255,24 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
+# --- Webhook Modu ---
+async def run_webhook_async():
+    port = int(os.environ.get("PORT", 10000))
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    logger.info(f"Webhook ayarlanıyor: {webhook_url}")
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=f"/webhook/{BOT_TOKEN}",
+        webhook_url=webhook_url,
+        drop_pending_updates=True
+    )
+
 # --- Ana Çalıştırıcı ---
 if __name__ == "__main__":
-    # Python sürüm hatasını önlemek için event loop'u garantiye al
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
-    port = int(os.environ.get("PORT", 10000))
-    
-    # Webhook URL'sini ayarla (Render ortam değişkeninden gelir)
     if RENDER_URL:
-        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-        logger.info(f"Webhook ayarlanıyor: {webhook_url}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=f"/webhook/{BOT_TOKEN}",
-            webhook_url=webhook_url,
-            drop_pending_updates=True
-        )
+        # asyncio.run() kullanarak döngüyü temiz başlat
+        asyncio.run(run_webhook_async())
     else:
-        # Eğer RENDER_EXTERNAL_URL environment değişkeni eklenmediyse polling'e düşer
-        logger.warning("RENDER_EXTERNAL_URL yok! Polling modunda başlatılıyor (Render'da çalışmaz).")
+        logger.warning("RENDER_EXTERNAL_URL yok! Polling modunda başlatılıyor.")
         application.run_polling(drop_pending_updates=True)
