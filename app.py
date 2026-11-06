@@ -109,7 +109,7 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Handler'lar (aynı) ---
+# --- Handler'lar ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
@@ -262,12 +262,10 @@ if __name__ == "__main__":
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
         logger.info(f"Webhook ayarlanıyor: {webhook_url}")
         
-        # Döngüyü manuel oluşturup run_webhook'u bu döngü içinde çalıştırıyoruz
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
-            # run_webhook zaten kendi içinde döngüyü yönetir, asyncio.run() kullanmıyoruz
             application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
@@ -276,7 +274,6 @@ if __name__ == "__main__":
                 drop_pending_updates=True
             )
         finally:
-            # Döngüyü kapatmadan önce uygulamanın kapandığından emin ol
             if not loop.is_closed():
                 loop.close()
     else:
