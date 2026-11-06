@@ -11,7 +11,7 @@ import requests
 from pathlib import Path
 from flask import Flask, request, Response
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler
@@ -105,7 +105,7 @@ def check_bot_limit(user_id):
     count = sum(1 for k in running_procs if k.startswith(uid + "_"))
     return count < (5 if is_premium(uid) else 1)
 
-def start_bot_process(user_id, bot_token, code_content):
+def start_bot_process(user_id, bot_token, code_content, bot_name="Bot"):
     uid = str(user_id)
     proc_key = f"{uid}_{int(time.time())}"
     bot_dir = DATA_DIR / "user_bots" / uid
@@ -118,7 +118,14 @@ def start_bot_process(user_id, bot_token, code_content):
         
     log_file = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": bot_token})
-    running_procs[proc_key] = {"proc": proc, "log_path": str(log_path), "token": bot_token, "started": time.time(), "user_id": uid}
+    running_procs[proc_key] = {
+        "proc": proc, 
+        "log_path": str(log_path), 
+        "token": bot_token, 
+        "started": time.time(), 
+        "user_id": uid,
+        "name": bot_name
+    }
     return proc_key
 
 def stop_bot_process(proc_key):
@@ -166,19 +173,74 @@ async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), parse_mode="Markdown")
 
 async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); uid = str(q.from_user.id)
+    q = update.callback_query; await q.answer()
+    uid = str(q.from_user.id)
     bl = [k for k in running_procs if k.startswith(uid + "_")]
+    
     if not bl:
         return await q.edit_message_text("🤖 Botun yok. Çalıştırmak için .py dosyanı gönder.", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]))
-    keyboard = []; text = "🤖 Botların:\n\n"
+    
+    keyboard = []
+    text = "🤖 **Botların:**\n\n"
+    
     for i, pk in enumerate(bl):
         st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
-        text += f"{i+1}. `{pk}` - {st}\n"
-        keyboard.append([premium_button(f"Log #{i+1}", f"log_{pk}", "📃", "primary"), premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger")])
+        text += f"{i+1}. `{running_procs[pk]['name']}` - {st}\n"
+        
+        if running_procs[pk]["proc"].poll() is None:
+            # Bot çalışıyorsa durdur butonu göster
+            keyboard.append([
+                premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
+                premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger")
+            ])
+        else:
+            # Bot durmuşsa başlat ve sil butonu göster
+            keyboard.append([
+                premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
+                premium_button(f"Başlat", f"start_{pk}", "▶", "success"),
+                premium_button(f"Sil", f"del_{pk}", "🗑", "danger")
+            ])
+            
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- Dosya Yükleme (Premium Kontrolü Eklendi) ---
+async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    pk = q.data.replace("start_", "")
+    
+    if pk in running_procs:
+        info = running_procs[pk]
+        bot_dir = DATA_DIR / "user_bots" / info["user_id"]
+        # Botun kodunu tekrar çalıştır
+        script_path = bot_dir / f"bot_{pk}.py"
+        log_path = info["log_path"]
+        
+        if script_path.exists():
+            log_file = open(log_path, "a", encoding="utf-8")
+            proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": info["token"]})
+            running_procs[pk]["proc"] = proc
+            await q.edit_message_text(f"▶ Bot yeniden başlatıldı: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+        else:
+            await q.edit_message_text("❌ Bot dosyası bulunamadı. Lütfen tekrar yükleyin.")
+    else:
+        await q.edit_message_text("❌ Bot bulunamadı.")
+
+async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    pk = q.data.replace("del_", "")
+    
+    if pk in running_procs:
+        info = running_procs[pk]
+        name = info["name"]
+        # Durmuşsa önce durdur
+        if info["proc"].poll() is None:
+            info["proc"].terminate()
+        del running_procs[pk]
+        await q.edit_message_text(f"🗑 Bot silindi: `{name}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+    else:
+        await q.edit_message_text("❌ Bot zaten yok.")
+
+# --- Dosya Yükleme ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     doc = update.message.document
@@ -189,7 +251,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_bot_limit(str(user.id)):
         return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
     
-    # Dosyayı geçici indir
     file = await context.bot.get_file(doc.file_id)
     tmp = DATA_DIR / f"tmp_{user.id}.py"
     await file.download_to_drive(tmp)
@@ -205,16 +266,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     extracted_token = token_match.group(1)
+    bot_name = doc.file_name.replace(".py", "")
+    
     context.bot_data[f"code_{user.id}"] = code
     context.bot_data[f"token_{user.id}"] = extracted_token
+    context.bot_data[f"name_{user.id}"] = bot_name
     
-    # PREMIUM KONTROLÜ
     if is_premium(user.id):
-        # Premium ise direkt başlat, admin onayı sorma
+        # Premium ise anında başlat
         global_state["bot_codes"][str(user.id)] = code
         save_state()
-        pk = start_bot_process(str(user.id), extracted_token, code)
-        await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız onay beklenmeden başlatıldı!\nİşlem No: `{pk}`", parse_mode="Markdown")
+        pk = start_bot_process(str(user.id), extracted_token, code, bot_name)
+        await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız onay beklenmeden başlatıldı!\nBot Adı: `{bot_name}`", parse_mode="Markdown")
     else:
         # Ücretsiz ise admin onayına gönder
         await context.bot.send_document(
@@ -239,16 +302,15 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = context.bot_data.get(f"code_{user_id}")
     token = context.bot_data.get(f"token_{user_id}")
+    name = context.bot_data.get(f"name_{user_id}", "Bot")
     
     if code and token:
         global_state["bot_codes"][user_id] = code
         save_state()
-        pk = start_bot_process(user_id, token, code)
+        pk = start_bot_process(user_id, token, code, name)
         
-        # Admin mesajını güncelle
-        await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nİşlem No: `{pk}`", parse_mode="Markdown")
+        await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nBot Adı: `{name}`", parse_mode="Markdown")
         
-        # Kullanıcıya bilgi ver
         try:
             await context.bot.send_message(
                 chat_id=int(user_id),
@@ -265,7 +327,6 @@ async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await q.edit_message_caption("❌ Reddedildi.")
     
-    # Kullanıcıya bilgi ver
     try:
         await context.bot.send_message(
             chat_id=int(user_id),
@@ -316,16 +377,19 @@ async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with open(running_procs[pk]["log_path"], "r", encoding="utf-8", errors="ignore") as f: content = f.read()[-3000:]
     except: content = "Log yok."
-    await q.edit_message_text(f"📃 Log: {pk}\n\n```\n{content}\n```", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="Markdown")
+    await q.edit_message_text(f"📃 Log: {running_procs[pk]['name']}\n\n```\n{content}\n```", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="Markdown")
 
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); pk = q.data.replace("stop_", "")
-    if stop_bot_process(pk): await q.edit_message_text(f"🔴 Durduruldu: `{pk}`", parse_mode="Markdown")
-    else: await q.edit_message_text("❌ Bot yok.")
+    if stop_bot_process(pk): 
+        await q.edit_message_text(f"🔴 Bot durduruldu.\nİşlem: `{pk}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+    else: 
+        await q.edit_message_text("❌ Bot yok.")
 
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
+# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
@@ -334,6 +398,8 @@ application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$
 application.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
 application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
 application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
+application.add_handler(CallbackQueryHandler(start_stopped_bot, pattern="^start_"))
+application.add_handler(CallbackQueryHandler(delete_bot, pattern="^del_"))
 application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
