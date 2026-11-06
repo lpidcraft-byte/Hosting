@@ -48,8 +48,8 @@ EMOJI_IDS = {
 DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
-REQ_FILE = Path("requirements.txt")
 
+# Veri yükleme/kayıt (Sadece dosyaya, Telegram'a mesaj YOK)
 def load_state():
     if STATE_FILE.exists():
         try:
@@ -90,8 +90,12 @@ def webhook():
         logger.error(f"Webhook hatası: {e}")
         return Response("Error", status=500)
 
-def premium_button(text, callback_data, emoji="✅", style=None):
-    kw = {"text": text, "callback_data": callback_data}
+def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
+    kw = {"text": text}
+    if url:
+        kw["url"] = url
+    else:
+        kw["callback_data"] = callback_data
     if emoji in EMOJI_IDS:
         kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
     if style:
@@ -140,7 +144,7 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Ana Menü Fonksiyonu (Buton Dizilimi Güzelleştirildi) ---
+# --- Ana Menü (Görseldeki Formatta) ---
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -149,24 +153,38 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
         save_state()
     
-    # Butonları yan yana ve dengeli yerleştiriyoruz
     keyboard = []
+    
+    # Görseldeki gibi geniş butonlar (alt alta)
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
     
-    keyboard.append([
-        premium_button("Botlarım", "my_bots", "🤖", "success"),
-        premium_button("Premium Al", "buy_premium", "💎", "primary")
-    ])
+    keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
+    keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
     keyboard.append([premium_button("Pip İndir", "pip_menu", "📦", "primary")])
     
-    text = f"👋 Merhaba {user.first_name}!\n\nBotunu çalıştırmak için '.py' dosyanı buraya gönder."
+    # En altta görseldeki gibi dış link butonu
+    keyboard.append([premium_button("Kanalı Ziyaret Et", emoji="🚀", style="success", url="https://t.me/telegram")])
+    
+    # Görseldeki gibi zengin metin formatı
+    text = (
+        f"👋 **Merhaba {user.first_name}!**\n\n"
+        "🤖 **VDS Bot Hosting Hizmeti**\n"
+        "Kendi botlarını 7/24 çalıştır, loglarını anlık görüntüle.\n\n"
+        "📦 **Pip Desteği**\n"
+        "Eksik modülleri tek tıkla yükle, hata almadan botunu çalıştır.\n\n"
+        "💎 **Premium Avantajları**\n"
+        "Sıra beklemeden anında onay, 5 bota kadar çalıştırma izni.\n\n"
+        "👇 **Hemen başla**\n"
+        "Botunu çalıştırmak için `.py` uzantılı dosyanı buraya gönder."
+    )
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
@@ -174,16 +192,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return await q.edit_message_text("⛔ Yetkisiz.")
+    
+    text = (
+        "👮‍♀ **Admin Paneli**\n\n"
+        "Aşağıdaki işlemlerden birini seçebilirsin:\n\n"
+        "👥 **Kullanıcı Listesi:** Kayıtlı kullanıcıları görüntüle."
+    )
     keyboard = [
         [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], 
         [premium_button("Geri", "back_start", "↩", "danger")]
     ]
-    await q.edit_message_text("👮‍♀ Admin Paneli", reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
-    text = "👥 Kullanıcı Listesi\n\n"
+    text = "👥 **Kullanıcı Listesi**\n\n"
     for uid, info in list(global_state["users"].items())[:50]:
         ps = "💎" if is_premium(uid) else ""
         text += f"🆔 `{uid}` | @{info.get('username','yok')} | {info.get('first_name','')} {ps}\n"
@@ -195,24 +219,23 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bl = [k for k in running_procs if k.startswith(uid + "_")]
     
     if not bl:
-        return await q.edit_message_text("🤖 Botun yok. Çalıştırmak için .py dosyanı gönder.", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]))
+        return await q.edit_message_text("🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder.", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), parse_mode="Markdown")
     
     keyboard = []
-    text = "🤖 **Botların:**\n\n"
+    text = "🤖 **Aktif Botlarınız**\n\n"
     
     for i, pk in enumerate(bl):
         st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
-        text += f"{i+1}. `{running_procs[pk]['name']}` - {st}\n"
+        text += f"📦 **{running_procs[pk]['name']}** - {st}\n"
         
-        # Butonları yan yana diziyoruz
-        row = [premium_button(f"Log Al", f"log_{pk}", "📃", "primary")]
+        # Geniş butonlar
         if running_procs[pk]["proc"].poll() is None:
-            row.append(premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger"))
+            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
+            keyboard.append([premium_button(f"Durdur: {running_procs[pk]['name']}", f"stop_{pk}", "⏹", "danger")])
         else:
-            row.append(premium_button(f"Başlat", f"start_{pk}", "▶", "success"))
-            row.append(premium_button(f"Sil", f"del_{pk}", "🗑", "danger"))
-        
-        keyboard.append(row)
+            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
+            keyboard.append([premium_button(f"Başlat: {running_procs[pk]['name']}", f"start_{pk}", "▶", "success")])
+            keyboard.append([premium_button(f"Sil: {running_procs[pk]['name']}", f"del_{pk}", "🗑", "danger")])
             
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -220,193 +243,140 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Pip Menüsü ---
 async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    
     text = (
         "📦 **Pip Paket İndirici**\n\n"
-        "Alt botlarınızda `No module named X` hatası alıyorsanız, buradan kütüphaneyi yükleyebilirsiniz.\n\n"
-        "Lütfen indirmek istediğiniz paketin adını yazın. (Örnek: `aiohttp`, `beautifulsoup4`, `pillow`)\n\n"
-        "**Not:** Yüklenen paketler tüm botlar için geçerli olur ve `requirements.txt` dosyasına eklenir."
+        "Alt botlarında eksik modül hatası mı alıyorsun?\n\n"
+        "🔍 **Nasıl Kullanılır?**\n"
+        "Aşağıya indirmek istediğin paketin adını yaz. Örnek: `aiohttp`, `beautifulsoup4`\n\n"
+        "⚡ **Hız**\n"
+        "Paketler arka planda indirilir, botun donmaz.\n\n"
+        "👇 **Hemen başla**\n"
+        "Paket adını mesaj olarak yaz."
     )
-    
     keyboard = [[premium_button("Geri", "back_start", "↩", "danger")]]
     context.user_data["awaiting_pip_package"] = True
-    
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+def install_pip_background(package_name, chat_id, context):
+    try:
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-q", package_name], capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            asyncio.run_coroutine_threadsafe(context.bot.send_message(chat_id=chat_id, text=f"✅ `{package_name}` başarıyla yüklendi!", parse_mode="Markdown"), bot_loop)
+        else:
+            asyncio.run_coroutine_threadsafe(context.bot.send_message(chat_id=chat_id, text=f"❌ Hata:\n\n```\n{result.stderr[-1000:]}\n```", parse_mode="Markdown"), bot_loop)
+    except Exception as e:
+        asyncio.run_coroutine_threadsafe(context.bot.send_message(chat_id=chat_id, text=f"❌ İşlem hatası: {e}"), bot_loop)
+
 async def handle_pip_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_pip_package"):
-        return
-    
+    if not context.user_data.get("awaiting_pip_package"): return
     package_name = update.message.text.strip()
     if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
-        return await update.message.reply_text("❌ Geçersiz paket adı! Lütfen sadece harf, rakam, tire (-) ve alt çizgi (_) kullanın.")
-    
+        return await update.message.reply_text("❌ Geçersiz paket adı!")
     context.user_data["awaiting_pip_package"] = False
-    status_msg = await update.message.reply_text(f"⏳ `{package_name}` yükleniyor, lütfen bekleyin...", parse_mode="Markdown")
-    
-    try:
-        result = subprocess.run([sys.executable, "-m", "pip", "install", package_name], capture_output=True, text=True)
-        if result.returncode != 0:
-            return await status_msg.edit_text(f"❌ Paket yüklenirken hata oluştu:\n\n```\n{result.stderr[-1000:]}\n```", parse_mode="Markdown")
-    except Exception as e:
-        return await status_msg.edit_text(f"❌ İşlem hatası: {e}")
-    
-    try:
-        reqs = []
-        if REQ_FILE.exists():
-            reqs = REQ_FILE.read_text(encoding="utf-8").splitlines()
-        
-        if package_name.lower() not in [r.split("==")[0].lower() for r in reqs]:
-            with open(REQ_FILE, "a", encoding="utf-8") as f:
-                f.write(f"\n{package_name}")
-    except Exception as e:
-        logger.error(f"Req ekleme hatası: {e}")
-    
-    await status_msg.edit_text(f"✅ `{package_name}` başarıyla yüklendi ve kalıcı hale getirildi!", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ `{package_name}` arka planda yükleniyor...", parse_mode="Markdown")
+    threading.Thread(target=install_pip_background, args=(package_name, update.effective_chat.id, context)).start()
 
 async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     pk = q.data.replace("start_", "")
-    
     if pk in running_procs:
         info = running_procs[pk]
         bot_dir = DATA_DIR / "user_bots" / info["user_id"]
         script_path = bot_dir / f"bot_{pk}.py"
-        log_path = info["log_path"]
-        
         if script_path.exists():
-            log_file = open(log_path, "a", encoding="utf-8")
+            log_file = open(info["log_path"], "a", encoding="utf-8")
             proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": info["token"]})
             running_procs[pk]["proc"] = proc
             await q.edit_message_text(f"▶ Bot yeniden başlatıldı: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-        else:
-            await q.edit_message_text("❌ Bot dosyası bulunamadı. Lütfen tekrar yükleyin.")
-    else:
-        await q.edit_message_text("❌ Bot bulunamadı.")
+        else: await q.edit_message_text("❌ Bot dosyası bulunamadı.")
+    else: await q.edit_message_text("❌ Bot bulunamadı.")
 
 async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     pk = q.data.replace("del_", "")
-    
     if pk in running_procs:
         info = running_procs[pk]
-        name = info["name"]
-        if info["proc"].poll() is None:
-            info["proc"].terminate()
+        if info["proc"].poll() is None: info["proc"].terminate()
         del running_procs[pk]
-        await q.edit_message_text(f"🗑 Bot silindi: `{name}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-    else:
-        await q.edit_message_text("❌ Bot zaten yok.")
+        await q.edit_message_text(f"🗑 Bot silindi: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+    else: await q.edit_message_text("❌ Bot zaten yok.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    doc = update.message.document
-    
-    if not doc.file_name.endswith(".py"):
-        return await update.message.reply_text("❌ Sadece `.py` uzantılı dosyalar kabul edilir.")
-    
-    if not check_bot_limit(str(user.id)):
-        return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
+    user = update.effective_user; doc = update.message.document
+    if not doc.file_name.endswith(".py"): return await update.message.reply_text("❌ Sadece `.py` dosyaları kabul edilir.")
+    if not check_bot_limit(str(user.id)): return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
     
     file = await context.bot.get_file(doc.file_id)
     tmp = DATA_DIR / f"tmp_{user.id}.py"
     await file.download_to_drive(tmp)
-    
     code = tmp.read_text(encoding="utf-8", errors="ignore")
     token_match = re.search(r"(\d+:[A-Za-z0-9_-]+)", code)
     
-    if not token_match:
-        return await update.message.reply_text(
-            "❌ **Hata:** Dosyanın içinde geçerli bir Telegram Bot Token'ı bulunamadı!\n\n"
-            "Token şu formatta olmalı: `123456789:ABCdef...`", 
-            parse_mode="Markdown"
-        )
+    if not token_match: return await update.message.reply_text("❌ Dosyada geçerli bir token bulunamadı!", parse_mode="Markdown")
+    extracted_token = token_match.group(1).strip().strip("'\"")
     
-    extracted_token = token_match.group(1)
+    try:
+        check = requests.get(f"https://api.telegram.org/bot{extracted_token}/getMe", timeout=10)
+        if not check.json().get("ok"): return await update.message.reply_text("❌ Dosyadaki token Telegram tarafından reddedildi!", parse_mode="Markdown")
+    except: return await update.message.reply_text("❌ Token doğrulanamadı.")
+    
     bot_name = doc.file_name.replace(".py", "")
-    
-    context.bot_data[f"code_{user.id}"] = code
-    context.bot_data[f"token_{user.id}"] = extracted_token
-    context.bot_data[f"name_{user.id}"] = bot_name
+    context.bot_data[f"code_{user.id}"] = code; context.bot_data[f"token_{user.id}"] = extracted_token; context.bot_data[f"name_{user.id}"] = bot_name
     
     if is_premium(user.id):
-        global_state["bot_codes"][str(user.id)] = code
-        save_state()
+        global_state["bot_codes"][str(user.id)] = code; save_state()
         pk = start_bot_process(str(user.id), extracted_token, code, bot_name)
-        await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız onay beklenmeden başlatıldı!\nBot Adı: `{bot_name}`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız anında başlatıldı!\nBot Adı: `{bot_name}`", parse_mode="Markdown")
     else:
         await context.bot.send_document(
             chat_id=ADMIN_ID, document=doc.file_id,
-            caption=f"📥 **Dosya Onayı (Ücretsiz Üye)**\n\n"
-                    f"👤 Kullanıcı: {user.first_name} (@{user.username})\n"
-                    f"🆔 ID: `{user.id}`\n"
-                    f"🤖 Bulunan Token: `{extracted_token}`\n"
-                    f"📄 Dosya: `{doc.file_name}`",
-            reply_markup=InlineKeyboardMarkup([[
-                premium_button("Onayla", f"approve_{user.id}", "✅", "success"),
-                premium_button("Reddet", f"reject_{user.id}", "❌", "danger")
-            ]]),
+            caption=f"📥 **Dosya Onayı**\n\n👤 {user.first_name} (@{user.username})\n🆔 `{user.id}`\n🤖 Token: `{extracted_token}`\n📄 `{doc.file_name}`",
+            reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{user.id}", "✅", "success"), premium_button("Reddet", f"reject_{user.id}", "❌", "danger")]]),
             parse_mode="Markdown"
         )
-        await update.message.reply_text("⏳ Dosyan admin onayına gönderildi. Lütfen bekle.")
+        await update.message.reply_text("⏳ Admin onayına gönderildi.")
 
 async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("approve_", "")
-    
-    code = context.bot_data.get(f"code_{user_id}")
-    token = context.bot_data.get(f"token_{user_id}")
-    name = context.bot_data.get(f"name_{user_id}", "Bot")
-    
+    code = context.bot_data.get(f"code_{user_id}"); token = context.bot_data.get(f"token_{user_id}"); name = context.bot_data.get(f"name_{user_id}", "Bot")
     if code and token:
-        global_state["bot_codes"][user_id] = code
-        save_state()
+        global_state["bot_codes"][user_id] = code; save_state()
         pk = start_bot_process(user_id, token, code, name)
-        
-        await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nBot Adı: `{name}`", parse_mode="Markdown")
-        
+        await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
         try:
-            await context.bot.send_message(
-                chat_id=int(user_id),
-                text=f"✅ **Sevgili kullanıcı,**\n\nDosyanız moderatörler tarafından incelendi ve aksilik tespit edilmedi, dosyanız çalışır halde, iyi kullanımlar!"
-            )
+            await context.bot.send_message(chat_id=int(user_id), text="✅ **Sevgili kullanıcı,**\n\nDosyanız moderatörler tarafından incelendi ve aksilik tespit edilmedi, dosyanız çalışır halde, iyi kullanımlar!")
         except: pass
-    else:
-        await q.edit_message_caption("❌ Hata: Kod veya token hafızada bulunamadı.")
+    else: await q.edit_message_caption("❌ Hata.")
 
 async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("reject_", "")
-    
     await q.edit_message_caption("❌ Reddedildi.")
-    
     try:
-        await context.bot.send_message(
-            chat_id=int(user_id),
-            text=f"❌ **Sevgili kullanıcı,**\n\nMaalesef dosyanız moderatörler tarafından incelendi ve bir aksilik çıkarak reddedildi."
-        )
+        await context.bot.send_message(chat_id=int(user_id), text="❌ **Sevgili kullanıcı,**\n\nMaalesef dosyanız moderatörler tarafından incelendi ve bir aksilik çıkarak reddedildi.")
     except: pass
 
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
+    text = (
+        "💎 **Premium Üyelik Avantajları**\n\n"
+        "👑 **Normal Üyelik**\n"
+        "Sadece 1 bot çalıştırabilirsin. Dosyalar admin onayı bekler.\n\n"
+        "⚡ **Premium Üyelik**\n"
+        "5 bota kadar çalıştırabilirsin. Dosyalar anında çalışır!\n\n"
+        "🚀 **Sunucu Önceliği**\n"
+        "Premium üyelerin botları daha hızlı yanıt verir.\n\n"
+        "👇 **Paket Seç**"
+    )
     keyboard = [
         [premium_button("1 Haftalık - 15 ⭐", "premium_7", "⭐", "primary")], 
         [premium_button("1 Aylık - 40 ⭐", "premium_30", "⭐", "success")], 
         [premium_button("1 Yıllık - 100 ⭐", "premium_365", "💎", "primary")], 
         [premium_button("Geri", "back_start", "↩", "danger")]
     ]
-    
-    text = (
-        "💎 **Premium Üyelik Avantajları**\n\n"
-        "👑 Normal kullanıcılar sadece **1** bot çalıştırabilir.\n"
-        "⚡ Premium üyeler aynı anda **5** bot çalıştırabilir!\n"
-        "🚀 Dosya yüklemelerinde **onay beklemez**, anında çalışır!\n"
-        "🎁 Sunucu kaynaklarında öncelik verilir.\n\n"
-        "Aşağıdan sana uygun paketi seçebilirsin:"
-    )
-    
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,7 +385,7 @@ async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_
     try:
         await context.bot.send_invoice(chat_id=q.from_user.id, title=f"Premium - {days} Gün", description=f"{days} gün premium.", payload=f"premium_{uid}_{days}", provider_token="", currency="XTR", prices=[{"label": "Premium", "amount": stars}])
     except Exception as e:
-        await q.edit_message_text(f"❌ Ödeme sistemi hatası: {e}")
+        await q.edit_message_text(f"❌ Hata: {e}")
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -432,16 +402,14 @@ async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with open(running_procs[pk]["log_path"], "r", encoding="utf-8", errors="ignore") as f: content = f.read()[-3000:]
     except: content = "Log yok."
-    await q.edit_message_text(f"📃 Log: {running_procs[pk]['name']}\n\n```\n{content}\n```", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="Markdown")
+    await q.edit_message_text(f"📃 **Log: {running_procs[pk]['name']}**\n\n```\n{content}\n```", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="Markdown")
 
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); pk = q.data.replace("stop_", "")
     if stop_bot_process(pk): 
-        await q.edit_message_text(f"🔴 Bot durduruldu.\nİşlem: `{pk}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-    else: 
-        await q.edit_message_text("❌ Bot yok.")
+        await q.edit_message_text(f"🔴 Bot durduruldu.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+    else: await q.edit_message_text("❌ Bot yok.")
 
-# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
