@@ -6,10 +6,11 @@ import threading
 import time
 import re
 import logging
+import asyncio
 from pathlib import Path
 from flask import Flask
 
-# --- Flask (Render Port Dinleme) ---
+# --- Flask Kurulumu (Render Port Dinleme Zorunluluğu) ---
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -21,9 +22,10 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
+# Flask'ı arka planda ayrı bir thread'de başlat
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- Telegram Bot ---
+# --- Telegram Bot Kurulumu ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -56,10 +58,11 @@ EMOJI_IDS = {
     "🌐": 5821388137443626414,
 }
 
-DATA_DIR = Path("/tmp/data")  # Render geçici dizin
+# Geçici dosya sistemi (Render için)
+DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = DATA_DIR / "state.json"
 
+# Global State (Telegram'a kaydedilecek veriler)
 global_state = {
     "users": {},
     "premium": {},
@@ -92,32 +95,20 @@ def check_bot_limit(user_id):
 def validate_token(token):
     return bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", token.strip()))
 
-# --- Telegram'a Veri Kaydetme (Kalıcı) ---
+# --- Telegram'a Veri Kaydetme ---
 async def sync_data(context: ContextTypes.DEFAULT_TYPE):
-    """Veriyi Telegram'a mesaj olarak kaydeder (Render silinse bile Telegram'da kalır)."""
     try:
         data_str = json.dumps(global_state, ensure_ascii=False)
-        # Eğer önceden kaydedilmiş mesaj varsa onu sil
-        if global_state["data_msg_id"]:
+        # Eski mesajı sil
+        if global_state.get("data_msg_id"):
             try: await context.bot.delete_message(chat_id=ADMIN_ID, message_id=global_state["data_msg_id"])
             except: pass
         
-        # Yeni mesaj gönder
+        # Yeni mesaj gönder (Kalıcı Veri)
         msg = await context.bot.send_message(chat_id=ADMIN_ID, text=f"💾 SİSTEM VERİSİ (SİLMEYİN)\n\n`{data_str}`", parse_mode="Markdown")
         global_state["data_msg_id"] = msg.message_id
     except Exception as e:
         logger.error(f"Sync hatası: {e}")
-
-async def load_data(context: ContextTypes.DEFAULT_TYPE):
-    """Bot başlarken Telegram'daki son veriyi çeker."""
-    try:
-        # Admin ile olan sohbetteki son 100 mesajı tara (Veri mesajını bulmak için)
-        # Not: Telegram API geçmiş mesajları okumaya izin vermez, sadece botun gönderdiği mesajları ID ile bilir.
-        # Bu yüzden en son mesaj ID'sini tahmin edemeyiz. En temizi: Kodu ilk çalıştırdığımızda veriyi sıfırdan oluşturmak.
-        # Kalıcılığı sağlamak için: Bot çökmeden önceki son veri her değişiklikte gönderilir.
-        pass
-    except Exception as e:
-        logger.error(f"Load hatası: {e}")
 
 def start_bot_process(user_id, bot_token, code_content=None):
     uid = str(user_id)
@@ -162,7 +153,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(user.id)
     
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-    await sync_data(context) # Veriyi TG'ye kaydet
+    await sync_data(context) 
     
     keyboard = []
     if user.id == ADMIN_ID:
@@ -220,7 +211,7 @@ async def handle_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_token"] = False
     uid = str(update.effective_user.id)
     global_state["pending_tokens"][uid] = token
-    await sync_data(context) # Veriyi kaydet
+    await sync_data(context)
     pk = start_bot_process(uid, token)
     await update.message.reply_text(f"✅ Bot başlatıldı: `{pk}`", parse_mode="Markdown")
 
@@ -245,7 +236,7 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(tmp)
         code = tmp.read_text(encoding="utf-8", errors="ignore")
         global_state["bot_codes"][user_id] = code
-        await sync_data(context) # Kodu TG'ye kaydet
+        await sync_data(context)
         token = global_state["pending_tokens"].get(user_id)
         if token:
             pk = start_bot_process(user_id, token, code)
@@ -283,7 +274,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.message; parts = msg.successful_payment.invoice_payload.split("_")
     uid = parts[1]; days = int(parts[2])
     global_state["premium"][uid] = time.time() + days * 86400
-    await sync_data(context) # Premiumu TG'ye kaydet
+    await sync_data(context)
     await msg.reply_text(f"✅ Premium aktif! {days} gün.")
 
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,7 +295,11 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
-def main():
+# --- Botu Çalıştıran Fonksiyon ---
+def run_bot():
+    # Render'daki event loop çakışmasını önlemek için yeni bir döngü oluşturuyoruz
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
@@ -322,8 +317,16 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
-    logger.info("Bot başlıyor...")
+    
+    logger.info("Telegram Botu başlatıldı.")
     app.run_polling()
 
+# --- Ana Çalıştırıcı ---
 if __name__ == "__main__":
-    main()
+    # Telegram botunu kendi thread'inde çalıştır
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Ana thread'i canlı tut (Flask zaten kendi thread'inde çalışıyor)
+    while True:
+        time.sleep(1)
