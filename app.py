@@ -48,6 +48,7 @@ EMOJI_IDS = {
 DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
+REQ_FILE = Path("requirements.txt")
 
 def load_state():
     if STATE_FILE.exists():
@@ -139,26 +140,29 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Ana Menü Fonksiyonu (Hem /start hem Callback için çalışır) ---
+# --- Ana Menü Fonksiyonu (Buton Dizilimi Güzelleştirildi) ---
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # Eğer komutla (/start) gelindiyse kullanıcıyı kaydet
     if update.message:
         uid = str(user.id)
         global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
         save_state()
     
+    # Butonları yan yana ve dengeli yerleştiriyoruz
     keyboard = []
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
-    keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
-    keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
+    
+    keyboard.append([
+        premium_button("Botlarım", "my_bots", "🤖", "success"),
+        premium_button("Premium Al", "buy_premium", "💎", "primary")
+    ])
+    keyboard.append([premium_button("Pip İndir", "pip_menu", "📦", "primary")])
     
     text = f"👋 Merhaba {user.first_name}!\n\nBotunu çalıştırmak için '.py' dosyanı buraya gönder."
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Eğer mesaj komutla geldiyse yeni mesaj at, butonla geldiyse mesajı düzenle
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
     elif update.callback_query:
@@ -170,7 +174,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return await q.edit_message_text("⛔ Yetkisiz.")
-    keyboard = [[premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], [premium_button("Geri", "back_start", "↩", "danger")]]
+    keyboard = [
+        [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], 
+        [premium_button("Geri", "back_start", "↩", "danger")]
+    ]
     await q.edit_message_text("👮‍♀ Admin Paneli", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,20 +204,65 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
         text += f"{i+1}. `{running_procs[pk]['name']}` - {st}\n"
         
+        # Butonları yan yana diziyoruz
+        row = [premium_button(f"Log Al", f"log_{pk}", "📃", "primary")]
         if running_procs[pk]["proc"].poll() is None:
-            keyboard.append([
-                premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
-                premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger")
-            ])
+            row.append(premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger"))
         else:
-            keyboard.append([
-                premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
-                premium_button(f"Başlat", f"start_{pk}", "▶", "success"),
-                premium_button(f"Sil", f"del_{pk}", "🗑", "danger")
-            ])
+            row.append(premium_button(f"Başlat", f"start_{pk}", "▶", "success"))
+            row.append(premium_button(f"Sil", f"del_{pk}", "🗑", "danger"))
+        
+        keyboard.append(row)
             
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+# --- Pip Menüsü ---
+async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    
+    text = (
+        "📦 **Pip Paket İndirici**\n\n"
+        "Alt botlarınızda `No module named X` hatası alıyorsanız, buradan kütüphaneyi yükleyebilirsiniz.\n\n"
+        "Lütfen indirmek istediğiniz paketin adını yazın. (Örnek: `aiohttp`, `beautifulsoup4`, `pillow`)\n\n"
+        "**Not:** Yüklenen paketler tüm botlar için geçerli olur ve `requirements.txt` dosyasına eklenir."
+    )
+    
+    keyboard = [[premium_button("Geri", "back_start", "↩", "danger")]]
+    context.user_data["awaiting_pip_package"] = True
+    
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def handle_pip_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_pip_package"):
+        return
+    
+    package_name = update.message.text.strip()
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
+        return await update.message.reply_text("❌ Geçersiz paket adı! Lütfen sadece harf, rakam, tire (-) ve alt çizgi (_) kullanın.")
+    
+    context.user_data["awaiting_pip_package"] = False
+    status_msg = await update.message.reply_text(f"⏳ `{package_name}` yükleniyor, lütfen bekleyin...", parse_mode="Markdown")
+    
+    try:
+        result = subprocess.run([sys.executable, "-m", "pip", "install", package_name], capture_output=True, text=True)
+        if result.returncode != 0:
+            return await status_msg.edit_text(f"❌ Paket yüklenirken hata oluştu:\n\n```\n{result.stderr[-1000:]}\n```", parse_mode="Markdown")
+    except Exception as e:
+        return await status_msg.edit_text(f"❌ İşlem hatası: {e}")
+    
+    try:
+        reqs = []
+        if REQ_FILE.exists():
+            reqs = REQ_FILE.read_text(encoding="utf-8").splitlines()
+        
+        if package_name.lower() not in [r.split("==")[0].lower() for r in reqs]:
+            with open(REQ_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n{package_name}")
+    except Exception as e:
+        logger.error(f"Req ekleme hatası: {e}")
+    
+    await status_msg.edit_text(f"✅ `{package_name}` başarıyla yüklendi ve kalıcı hale getirildi!", parse_mode="Markdown")
 
 async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -394,6 +446,7 @@ application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
 application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
+application.add_handler(CallbackQueryHandler(pip_menu, pattern="^pip_menu$"))
 application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
 application.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
 application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
@@ -402,9 +455,11 @@ application.add_handler(CallbackQueryHandler(start_stopped_bot, pattern="^start_
 application.add_handler(CallbackQueryHandler(delete_bot, pattern="^del_"))
 application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
-# Geri butonu artık özel show_main_menu fonksiyonuna gidiyor
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
+
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pip_input))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
