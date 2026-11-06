@@ -2,13 +2,12 @@ import os
 import sys
 import json
 import subprocess
-import threading
 import time
 import re
 import logging
 import asyncio
 from pathlib import Path
-from flask import Flask, request
+from flask import Flask, request, Response
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -52,6 +51,33 @@ running_procs = {}
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Flask Uygulaması ---
+flask_app = Flask(__name__)
+
+@flask_app.route("/", methods=["GET"])
+def health():
+    return "Bot is running", 200
+
+@flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    try:
+        # Gelen JSON verisini botun anlayacağı formata çevir
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        
+        # Asenkron işleme kuyruğuna ekle (ana thread'i bloklamaz)
+        if bot_loop:
+            asyncio.run_coroutine_threadsafe(
+                application.update_queue.put(update), 
+                bot_loop
+            )
+        return Response("OK", status=200)
+    except Exception as e:
+        logger.error(f"Webhook işleme hatası: {e}")
+        return Response("Error", status=500)
+
+# --- Bot Uygulaması ---
+application = Application.builder().token(BOT_TOKEN).build()
 
 def premium_button(text, callback_data, emoji="✅", style=None):
     kw = {"text": text, "callback_data": callback_data}
@@ -234,9 +260,7 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
-# --- Uygulama ---
-application = Application.builder().token(BOT_TOKEN).build()
-
+# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
@@ -254,28 +278,34 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-# --- Webhook / Polling Çalıştırıcı ---
+# --- Ana Çalıştırıcı ---
+bot_loop = None
+
+def run_bot_async_loop(loop):
+    """Botun asenkron döngüsünü arka planda çalıştırır."""
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True)) # Webhook yerine polling kullanıyoruz, çünkü webhook'u Flask karşılıyor.
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    bot_loop = asyncio.new_event_loop()
     
+    # Botu arka plan thread'inde başlat
+    import threading
+    bot_thread = threading.Thread(target=run_bot_async_loop, args=(bot_loop,), daemon=True)
+    bot_thread.start()
+    
+    # Webhook'u Telegram'a bildir
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-        logger.info(f"Webhook ayarlanıyor: {webhook_url}")
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+        import requests
         try:
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=f"/webhook/{BOT_TOKEN}",
-                webhook_url=webhook_url,
-                drop_pending_updates=True
-            )
-        finally:
-            if not loop.is_closed():
-                loop.close()
-    else:
-        logger.warning("RENDER_EXTERNAL_URL yok! Polling modunda başlatılıyor.")
-        application.run_polling(drop_pending_updates=True)
+            requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+            logger.info(f"Webhook ayarlandı: {webhook_url}")
+        except Exception as e:
+            logger.error(f"Webhook ayarlanamadı: {e}")
+    
+    # Flask'ı çalıştır (Render'ın port dinleme zorunluluğu için)
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
