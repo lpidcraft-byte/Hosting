@@ -11,7 +11,7 @@ import requests
 from pathlib import Path
 from flask import Flask, request, Response
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler
@@ -45,12 +45,10 @@ EMOJI_IDS = {
     "🌐": 5821388137443626414,
 }
 
-# Verileri tutacağımız dosya yolu
 DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
-# Veriyi dosyadan yükle (Bot açılırken)
 def load_state():
     if STATE_FILE.exists():
         try:
@@ -59,7 +57,6 @@ def load_state():
         except: pass
     return {"users": {}, "premium": {}, "bot_codes": {}}
 
-# Veriyi dosyaya kaydet (Sadece dosyaya yazar, mesaj ATMAAAAZ)
 def save_state():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -73,11 +70,9 @@ running_procs = {}
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Bot Uygulaması ---
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
 bot_loop = asyncio.new_event_loop()
 
-# --- Flask Uygulaması ---
 flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
@@ -94,7 +89,6 @@ def webhook():
         logger.error(f"Webhook hatası: {e}")
         return Response("Error", status=500)
 
-# --- Yardımcılar ---
 def premium_button(text, callback_data, emoji="✅", style=None):
     kw = {"text": text, "callback_data": callback_data}
     if emoji in EMOJI_IDS:
@@ -142,7 +136,7 @@ def stop_bot_process(proc_key):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-    save_state() # Dosyaya kaydet
+    save_state()
     
     keyboard = []
     if user.id == ADMIN_ID:
@@ -152,7 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"👋 Merhaba {user.first_name}!\n\n"
-        f"Botunu çalıştırmak için '.py' dosyanı buraya gönder.", 
+        f"Botunu çalıştırmak için '.py' dosyanı buraya gönder.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -184,7 +178,7 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- Dosya Yükleme (Token Kontrolü) ---
+# --- Dosya Yükleme (Premium Kontrolü Eklendi) ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     doc = update.message.document
@@ -192,7 +186,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc.file_name.endswith(".py"):
         return await update.message.reply_text("❌ Sadece `.py` uzantılı dosyalar kabul edilir.")
     
-    # Limit kontrolü
     if not check_bot_limit(str(user.id)):
         return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
     
@@ -202,8 +195,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(tmp)
     
     code = tmp.read_text(encoding="utf-8", errors="ignore")
-    
-    # Dosya içinden Token Ara (Regex: Sayısal kısım : Harf/Rakam)
     token_match = re.search(r"(\d+:[A-Za-z0-9_-]+)", code)
     
     if not token_match:
@@ -214,26 +205,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     extracted_token = token_match.group(1)
-    
-    # Admin Onayına Gönder
-    await context.bot.send_document(
-        chat_id=ADMIN_ID, document=doc.file_id,
-        caption=f"📥 **Dosya Onayı**\n\n"
-                f"👤 Kullanıcı: {user.first_name} (@{user.username})\n"
-                f"🆔 ID: `{user.id}`\n"
-                f"🤖 Bulunan Token: `{extracted_token}`\n"
-                f"📄 Dosya: `{doc.file_name}`",
-        reply_markup=InlineKeyboardMarkup([[
-            premium_button("Onayla", f"approve_{user.id}", "✅", "success"),
-            premium_button("Reddet", f"reject_{user.id}", "❌", "danger")
-        ]]),
-        parse_mode="Markdown"
-    )
-    await update.message.reply_text("⏳ Dosyan admin onayına gönderildi. Lütfen bekle.")
-    
-    # Kod ve token'ı hafızada tut
     context.bot_data[f"code_{user.id}"] = code
     context.bot_data[f"token_{user.id}"] = extracted_token
+    
+    # PREMIUM KONTROLÜ
+    if is_premium(user.id):
+        # Premium ise direkt başlat, admin onayı sorma
+        global_state["bot_codes"][str(user.id)] = code
+        save_state()
+        pk = start_bot_process(str(user.id), extracted_token, code)
+        await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız onay beklenmeden başlatıldı!\nİşlem No: `{pk}`", parse_mode="Markdown")
+    else:
+        # Ücretsiz ise admin onayına gönder
+        await context.bot.send_document(
+            chat_id=ADMIN_ID, document=doc.file_id,
+            caption=f"📥 **Dosya Onayı (Ücretsiz Üye)**\n\n"
+                    f"👤 Kullanıcı: {user.first_name} (@{user.username})\n"
+                    f"🆔 ID: `{user.id}`\n"
+                    f"🤖 Bulunan Token: `{extracted_token}`\n"
+                    f"📄 Dosya: `{doc.file_name}`",
+            reply_markup=InlineKeyboardMarkup([[
+                premium_button("Onayla", f"approve_{user.id}", "✅", "success"),
+                premium_button("Reddet", f"reject_{user.id}", "❌", "danger")
+            ]]),
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text("⏳ Dosyan admin onayına gönderildi. Lütfen bekle.")
 
 async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -245,17 +242,37 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if code and token:
         global_state["bot_codes"][user_id] = code
-        save_state() # Veriyi dosyaya kaydet
+        save_state()
         pk = start_bot_process(user_id, token, code)
+        
+        # Admin mesajını güncelle
         await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nİşlem No: `{pk}`", parse_mode="Markdown")
+        
+        # Kullanıcıya bilgi ver
+        try:
+            await context.bot.send_message(
+                chat_id=int(user_id),
+                text=f"✅ **Sevgili kullanıcı,**\n\nDosyanız moderatörler tarafından incelendi ve aksilik tespit edilmedi, dosyanız çalışır halde, iyi kullanımlar!"
+            )
+        except: pass
     else:
         await q.edit_message_caption("❌ Hata: Kod veya token hafızada bulunamadı.")
 
 async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    if q.from_user.id == ADMIN_ID: await q.edit_message_caption("❌ Reddedildi.")
+    if q.from_user.id != ADMIN_ID: return
+    user_id = q.data.replace("reject_", "")
+    
+    await q.edit_message_caption("❌ Reddedildi.")
+    
+    # Kullanıcıya bilgi ver
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id),
+            text=f"❌ **Sevgili kullanıcı,**\n\nMaalesef dosyanız moderatörler tarafından incelendi ve bir aksilik çıkarak reddedildi."
+        )
+    except: pass
 
-# --- Premium Menüsü (Özellikler Eklendi) ---
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     keyboard = [
@@ -269,7 +286,8 @@ async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💎 **Premium Üyelik Avantajları**\n\n"
         "👑 Normal kullanıcılar sadece **1** bot çalıştırabilir.\n"
         "⚡ Premium üyeler aynı anda **5** bot çalıştırabilir!\n"
-        "🚀 Sunucu kaynaklarında öncelik verilir.\n\n"
+        "🚀 Dosya yüklemelerinde **onay beklemez**, anında çalışır!\n"
+        "🎁 Sunucu kaynaklarında öncelik verilir.\n\n"
         "Aşağıdan sana uygun paketi seçebilirsin:"
     )
     
@@ -289,7 +307,7 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message; parts = msg.successful_payment.invoice_payload.split("_")
     global_state["premium"][parts[1]] = time.time() + int(parts[2]) * 86400
-    save_state() # Veriyi dosyaya kaydet
+    save_state()
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +326,6 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); await start(update, context)
 
-# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
@@ -324,7 +341,6 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-# --- Bot Asenkron Döngüsü ---
 def run_bot_async_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(application.initialize())
@@ -332,11 +348,9 @@ def run_bot_async_loop(loop):
     loop.run_forever()
 
 if __name__ == "__main__":
-    # Bot thread'ini başlat
     bot_thread = threading.Thread(target=run_bot_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
     
-    # Webhook'u Telegram'a bildir
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
         try:
@@ -345,6 +359,5 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Webhook ayarlanamadı: {e}")
     
-    # Flask'ı başlat
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
