@@ -6,6 +6,8 @@ import time
 import re
 import logging
 import asyncio
+import threading
+import requests
 from pathlib import Path
 from flask import Flask, request, Response
 
@@ -52,6 +54,11 @@ running_procs = {}
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Bot Uygulaması ---
+# updater(None) ile polling devre dışı, sadece webhook kullanılacak
+application = Application.builder().token(BOT_TOKEN).updater(None).build()
+bot_loop = asyncio.new_event_loop()
+
 # --- Flask Uygulaması ---
 flask_app = Flask(__name__)
 
@@ -62,23 +69,18 @@ def health():
 @flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     try:
-        # Gelen JSON verisini botun anlayacağı formata çevir
         update = Update.de_json(request.get_json(force=True), application.bot)
-        
-        # Asenkron işleme kuyruğuna ekle (ana thread'i bloklamaz)
-        if bot_loop:
-            asyncio.run_coroutine_threadsafe(
-                application.update_queue.put(update), 
-                bot_loop
-            )
+        # Gelen güncellemeyi asenkron kuyruğa ekle
+        asyncio.run_coroutine_threadsafe(
+            application.update_queue.put(update),
+            bot_loop
+        )
         return Response("OK", status=200)
     except Exception as e:
-        logger.error(f"Webhook işleme hatası: {e}")
+        logger.error(f"Webhook hatası: {e}")
         return Response("Error", status=500)
 
-# --- Bot Uygulaması ---
-application = Application.builder().token(BOT_TOKEN).build()
-
+# --- Yardımcılar ---
 def premium_button(text, callback_data, emoji="✅", style=None):
     kw = {"text": text, "callback_data": callback_data}
     if emoji in EMOJI_IDS:
@@ -278,34 +280,29 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-# --- Ana Çalıştırıcı ---
-bot_loop = None
-
+# --- Bot Asenkron Döngüsü ---
 def run_bot_async_loop(loop):
-    """Botun asenkron döngüsünü arka planda çalıştırır."""
     asyncio.set_event_loop(loop)
+    # Uygulamayı başlat (handler'ları ve kuyruğu hazırlar)
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
-    loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True)) # Webhook yerine polling kullanıyoruz, çünkü webhook'u Flask karşılıyor.
+    # Kuyruğu işleyen döngüyü başlat
+    loop.run_forever()
 
 if __name__ == "__main__":
-    bot_loop = asyncio.new_event_loop()
-    
-    # Botu arka plan thread'inde başlat
-    import threading
+    # Bot asenkron döngüsünü arka planda çalıştır
     bot_thread = threading.Thread(target=run_bot_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
     
-    # Webhook'u Telegram'a bildir
+    # Telegram'a Webhook adresini bildir
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-        import requests
         try:
-            requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-            logger.info(f"Webhook ayarlandı: {webhook_url}")
+            r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+            logger.info(f"Webhook ayarlandı: {r.json()}")
         except Exception as e:
             logger.error(f"Webhook ayarlanamadı: {e}")
     
-    # Flask'ı çalıştır (Render'ın port dinleme zorunluluğu için)
+    # Flask'ı çalıştır
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
