@@ -22,6 +22,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "9053394489:AAEMkxfOuDRVTcTY4mWluMgNdDbj
 ADMIN_ID = 8913966694
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
+# Zorunlu Kanallar (ID ve Davet Linkleri)
+REQUIRED_CHANNELS = [
+    {"id": -1003947388912, "link": "https://t.me/+3A7s7kVfaoMxYjM0", "name": "𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 𝗧𝗘𝗔𝗠 #𝐊𝐫𝐚𝐥𝐥𝐢𝐤"},
+    {"id": -1004443368027, "link": "https://t.me/vantoriumchat", "name": "𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 TEAM sohbet"}
+]
+
 EMOJI_IDS = {
     "👋": 5454390891466726015, "👍": 5456267427102858366, "⚠": 5879449820338330922,
     "👮‍♀": 5818678700274617758, "👮": 5818678700274617758,
@@ -49,7 +55,6 @@ DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
-# Veri yükleme/kayıt (Sadece dosyaya, Telegram'a mesaj YOK)
 def load_state():
     if STATE_FILE.exists():
         try:
@@ -110,6 +115,52 @@ def check_bot_limit(user_id):
     count = sum(1 for k in running_procs if k.startswith(uid + "_"))
     return count < (5 if is_premium(uid) else 1)
 
+# --- Zorunlu Kanal Kontrolü ---
+async def check_membership(user_id: int) -> bool:
+    """Kullanıcının tüm zorunlu kanallara üye olup olmadığını kontrol eder."""
+    for ch in REQUIRED_CHANNELS:
+        try:
+            member = await application.bot.get_chat_member(chat_id=ch["id"], user_id=user_id)
+            if member.status not in ["member", "administrator", "creator"]:
+                return False
+        except Exception as e:
+            logger.error(f"Kanal kontrol hatası ({ch['name']}): {e}")
+            return False
+    return True
+
+async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kullanıcıya katılması gereken kanalları gösterir."""
+    keyboard = []
+    for ch in REQUIRED_CHANNELS:
+        keyboard.append([premium_button(f"Katıl: {ch['name']}", emoji="📢", style="primary", url=ch["link"])])
+    
+    keyboard.append([premium_button("✅ Kontrol Et", "check_join", "✅", "success")])
+    
+    text = (
+        "⚠️ **Zorunlu Kanal Üyeliği**\n\n"
+        "Botu kullanabilmek için aşağıdaki kanallara katılman gerekiyor:\n\n"
+        "1️⃣ **𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 𝗧𝗘𝗔𝗠 #𝐊𝐫𝐚𝐥𝐥𝐢𝐤** (Kanal)\n"
+        "2️⃣ **𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 TEAM sohbet** (Grup)\n\n"
+        "Katıldıktan sonra **Kontrol Et** butonuna bas."
+    )
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kullanıcı 'Kontrol Et' butonuna bastığında çalışır."""
+    q = update.callback_query
+    await q.answer()
+    
+    if await check_membership(q.from_user.id):
+        # Üyelik onaylandı, ana menüye yönlendir
+        await show_main_menu(update, context)
+    else:
+        await q.answer("❌ Henüz tüm kanallara katılmadın!", show_alert=True)
+
 def start_bot_process(user_id, bot_token, code_content, bot_name="Bot"):
     uid = str(user_id)
     proc_key = f"{uid}_{int(time.time())}"
@@ -144,7 +195,7 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Ana Menü (Görseldeki Formatta) ---
+# --- Ana Menü ---
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -154,8 +205,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
     
     keyboard = []
-    
-    # Görseldeki gibi geniş butonlar (alt alta)
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
     
@@ -163,10 +212,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
     keyboard.append([premium_button("Pip İndir", "pip_menu", "📦", "primary")])
     
-    # En altta görseldeki gibi dış link butonu
-    keyboard.append([premium_button("Kanalı Ziyaret Et", emoji="🚀", style="success", url="https://t.me/telegram")])
+    # Kanalı Ziyaret Et butonu artık senin kanalına gidiyor
+    keyboard.append([premium_button("Kanalı Ziyaret Et", emoji="🚀", style="success", url="https://t.me/+3A7s7kVfaoMxYjM0")])
     
-    # Görseldeki gibi zengin metin formatı
     text = (
         f"👋 **Merhaba {user.first_name}!**\n\n"
         "🤖 **VDS Bot Hosting Hizmeti**\n"
@@ -187,21 +235,21 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Önce üyelik kontrolü yap
+    if not await check_membership(user_id):
+        await send_join_message(update, context)
+        return
+    
     await show_main_menu(update, context)
 
+# --- Diğer Handler'lar (Aynı, ama artık üyelik kontrolü start'ta yapılıyor) ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return await q.edit_message_text("⛔ Yetkisiz.")
-    
-    text = (
-        "👮‍♀ **Admin Paneli**\n\n"
-        "Aşağıdaki işlemlerden birini seçebilirsin:\n\n"
-        "👥 **Kullanıcı Listesi:** Kayıtlı kullanıcıları görüntüle."
-    )
-    keyboard = [
-        [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], 
-        [premium_button("Geri", "back_start", "↩", "danger")]
-    ]
+    text = "👮‍♀ **Admin Paneli**\n\nAşağıdaki işlemlerden birini seçebilirsin:"
+    keyboard = [[premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], [premium_button("Geri", "back_start", "↩", "danger")]]
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,12 +271,9 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     text = "🤖 **Aktif Botlarınız**\n\n"
-    
     for i, pk in enumerate(bl):
         st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
         text += f"📦 **{running_procs[pk]['name']}** - {st}\n"
-        
-        # Geniş butonlar
         if running_procs[pk]["proc"].poll() is None:
             keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
             keyboard.append([premium_button(f"Durdur: {running_procs[pk]['name']}", f"stop_{pk}", "⏹", "danger")])
@@ -236,11 +281,9 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
             keyboard.append([premium_button(f"Başlat: {running_procs[pk]['name']}", f"start_{pk}", "▶", "success")])
             keyboard.append([premium_button(f"Sil: {running_procs[pk]['name']}", f"del_{pk}", "🗑", "danger")])
-            
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- Pip Menüsü ---
 async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     text = (
@@ -410,7 +453,9 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"🔴 Bot durduruldu.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
     else: await q.edit_message_text("❌ Bot yok.")
 
+# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
 application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
