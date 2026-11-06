@@ -47,15 +47,30 @@ EMOJI_IDS = {
 
 DATA_DIR = Path("/tmp/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE = DATA_DIR / "state.json"
 
-global_state = {"users": {}, "premium": {}, "pending_tokens": {}, "bot_codes": {}, "data_msg_id": None}
+# Yerel veri yükleme (Sistem verisi mesajı atılmayacak)
+def load_local_state():
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: pass
+    return {"users": {}, "premium": {}, "bot_codes": {}}
+
+def save_local_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(global_state, f, ensure_ascii=False)
+    except: pass
+
+global_state = load_local_state()
 running_procs = {}
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Bot Uygulaması ---
-# updater(None) ile polling devre dışı, sadece webhook kullanılacak
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
 bot_loop = asyncio.new_event_loop()
 
@@ -70,11 +85,7 @@ def health():
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        # Gelen güncellemeyi asenkron kuyruğa ekle
-        asyncio.run_coroutine_threadsafe(
-            application.update_queue.put(update),
-            bot_loop
-        )
+        asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
         return Response("OK", status=200)
     except Exception as e:
         logger.error(f"Webhook hatası: {e}")
@@ -97,30 +108,17 @@ def check_bot_limit(user_id):
     count = sum(1 for k in running_procs if k.startswith(uid + "_"))
     return count < (5 if is_premium(uid) else 1)
 
-def validate_token(token):
-    return bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", token.strip()))
-
-async def sync_data(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        data_str = json.dumps(global_state, ensure_ascii=False)
-        if global_state.get("data_msg_id"):
-            try: await context.bot.delete_message(chat_id=ADMIN_ID, message_id=global_state["data_msg_id"])
-            except: pass
-        msg = await context.bot.send_message(chat_id=ADMIN_ID, text=f"💾 SİSTEM VERİSİ\n\n`{data_str}`", parse_mode="Markdown")
-        global_state["data_msg_id"] = msg.message_id
-    except Exception as e:
-        logger.error(f"Sync hatası: {e}")
-
-def start_bot_process(user_id, bot_token, code_content=None):
+def start_bot_process(user_id, bot_token, code_content):
     uid = str(user_id)
     proc_key = f"{uid}_{int(time.time())}"
     bot_dir = DATA_DIR / "user_bots" / uid
     bot_dir.mkdir(parents=True, exist_ok=True)
     script_path = bot_dir / f"bot_{proc_key}.py"
     log_path = bot_dir / f"log_{proc_key}.txt"
-    code = code_content or global_state["bot_codes"].get(uid, "# placeholder\nimport time\nwhile True:\n    print('running...')\n    time.sleep(5)\n")
+    
     with open(script_path, "w", encoding="utf-8") as f:
-        f.write(code)
+        f.write(code_content)
+        
     log_file = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": bot_token})
     running_procs[proc_key] = {"proc": proc, "log_path": str(log_path), "token": bot_token, "started": time.time(), "user_id": uid}
@@ -141,13 +139,14 @@ def stop_bot_process(proc_key):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; uid = str(user.id)
     global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-    await sync_data(context)
+    save_local_state()
+    
     keyboard = []
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
     keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
-    await update.message.reply_text(f"👋 Merhaba {user.first_name}!", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"👋 Merhaba {user.first_name}!\n\nBotunu çalıştırmak için '.py' dosyanı buraya gönder.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -168,65 +167,95 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); uid = str(q.from_user.id)
     bl = [k for k in running_procs if k.startswith(uid + "_")]
     if not bl:
-        return await q.edit_message_text("🤖 Botun yok.", reply_markup=InlineKeyboardMarkup([[premium_button("Yeni Bot Ekle", "add_bot", "➕", "success")],[premium_button("Geri", "back_start", "↩", "danger")]]))
+        return await q.edit_message_text("🤖 Botun yok. Çalıştırmak için .py dosyanı gönder.", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]))
     keyboard = []; text = "🤖 Botların:\n\n"
     for i, pk in enumerate(bl):
         st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
         text += f"{i+1}. `{pk}` - {st}\n"
         keyboard.append([premium_button(f"Log #{i+1}", f"log_{pk}", "📃", "primary"), premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger")])
-    keyboard.append([premium_button("Yeni Bot Ekle", "add_bot", "➕", "success")])
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def add_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    if not check_bot_limit(str(q.from_user.id)):
-        return await q.edit_message_text("⚠️ Limit doldu! Premium al.", reply_markup=InlineKeyboardMarkup([[premium_button("Premium", "buy_premium", "💎", "success")],[premium_button("Geri", "my_bots", "↩", "danger")]]))
-    context.user_data["awaiting_token"] = True
-    await q.edit_message_text("📥 Tokeni gönder.\nFormat: `123456:ABC...`", parse_mode="Markdown")
-
-async def handle_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_token"): return
-    token = update.message.text.strip()
-    if not validate_token(token):
-        return await update.message.reply_text("❌ Hatalı format! `123456:ABC...` şeklinde olmalı.", parse_mode="Markdown")
-    context.user_data["awaiting_token"] = False
-    uid = str(update.effective_user.id); global_state["pending_tokens"][uid] = token
-    await sync_data(context)
-    pk = start_bot_process(uid, token)
-    await update.message.reply_text(f"✅ Bot başlatıldı: `{pk}`", parse_mode="Markdown")
-
+# --- Dosya Yükleme (Token Kontrolü) ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user; doc = update.message.document
-    if not (doc.file_name.endswith(".py") or doc.file_name.endswith(".txt")): return
-    await context.bot.send_document(chat_id=ADMIN_ID, document=doc.file_id, caption=f"📥 Onay\n👤 {user.first_name} (@{user.username})\n🆔 `{user.id}`\n📄 `{doc.file_name}`", reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{user.id}", "✅", "success"), premium_button("Reddet", f"reject_{user.id}", "❌", "danger")]]), parse_mode="Markdown")
-    await update.message.reply_text("✅ Onaya gönderildi.")
+    user = update.effective_user
+    doc = update.message.document
+    
+    if not doc.file_name.endswith(".py"):
+        return await update.message.reply_text("❌ Sadece `.py` uzantılı dosyalar kabul edilir.")
+    
+    # Limit kontrolü
+    if not check_bot_limit(str(user.id)):
+        return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
+    
+    # Dosyayı geçici indir
+    file = await context.bot.get_file(doc.file_id)
+    tmp = DATA_DIR / f"tmp_{user.id}.py"
+    await file.download_to_drive(tmp)
+    
+    code = tmp.read_text(encoding="utf-8", errors="ignore")
+    
+    # Dosya içinden Token Ara (Regex: Sayısal kısım : Harf/Rakam)
+    token_match = re.search(r"(\d+:[A-Za-z0-9_-]+)", code)
+    
+    if not token_match:
+        return await update.message.reply_text(
+            "❌ **Hata:** Dosyanın içinde geçerli bir Telegram Bot Token'ı bulunamadı!\n\n"
+            "Token şu formatta olmalı: `123456789:ABCdef...`", 
+            parse_mode="Markdown"
+        )
+    
+    extracted_token = token_match.group(1)
+    
+    # Admin Onayına Gönder
+    await context.bot.send_document(
+        chat_id=ADMIN_ID, document=doc.file_id,
+        caption=f"📥 **Dosya Onayı**\n\n"
+                f"👤 Kullanıcı: {user.first_name} (@{user.username})\n"
+                f"🆔 ID: `{user.id}`\n"
+                f"🤖 Bulunan Token: `{extracted_token}`\n"
+                f"📄 Dosya: `{doc.file_name}`",
+        reply_markup=InlineKeyboardMarkup([[
+            premium_button("Onayla", f"approve_{user.id}", "✅", "success"),
+            premium_button("Reddet", f"reject_{user.id}", "❌", "danger")
+        ]]),
+        parse_mode="Markdown"
+    )
+    await update.message.reply_text("⏳ Dosyan admin onayına gönderildi. Lütfen bekle.")
+    
+    # Kod ve token'ı hafızada tut
+    context.bot_data[f"code_{user.id}"] = code
+    context.bot_data[f"token_{user.id}"] = extracted_token
 
 async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("approve_", "")
-    if q.message.document:
-        file = await context.bot.get_file(q.message.document.file_id)
-        tmp = DATA_DIR / f"tmp_{user_id}.py"
-        await file.download_to_drive(tmp)
-        code = tmp.read_text(encoding="utf-8", errors="ignore")
+    
+    code = context.bot_data.get(f"code_{user_id}")
+    token = context.bot_data.get(f"token_{user_id}")
+    
+    if code and token:
         global_state["bot_codes"][user_id] = code
-        await sync_data(context)
-        token = global_state["pending_tokens"].get(user_id)
-        if token:
-            pk = start_bot_process(user_id, token, code)
-            await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı: `{pk}`", parse_mode="Markdown")
-        else:
-            await q.edit_message_caption("✅ Kod kaydedildi ancak token yok.")
+        save_local_state()
+        pk = start_bot_process(user_id, token, code)
+        await q.edit_message_caption(f"✅ Onaylandı ve başlatıldı.\nİşlem No: `{pk}`", parse_mode="Markdown")
+    else:
+        await q.edit_message_caption("❌ Hata: Kod veya token hafızada bulunamadı.")
 
 async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id == ADMIN_ID: await q.edit_message_caption("❌ Reddedildi.")
 
+# --- Premium ve Diğerleri ---
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    keyboard = [[premium_button("1 Haftalık - 15 ⭐", "premium_7", "⭐", "primary")], [premium_button("1 Aylık - 40 ⭐", "premium_30", "⭐", "success")], [premium_button("1 Yıllık - 100 ⭐", "premium_365", "💎", "primary")], [premium_button("Geri", "back_start", "↩", "danger")]]
+    keyboard = [
+        [premium_button("1 Haftalık - 15 ⭐", "premium_7", "⭐", "primary")], 
+        [premium_button("1 Aylık - 40 ⭐", "premium_30", "⭐", "success")], 
+        [premium_button("1 Yıllık - 100 ⭐", "premium_365", "💎", "primary")], 
+        [premium_button("Geri", "back_start", "↩", "danger")]
+    ]
     await q.edit_message_text("💎 Premium Üyelik\n\nPaket seç:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,7 +264,7 @@ async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_
     try:
         await context.bot.send_invoice(chat_id=q.from_user.id, title=f"Premium - {days} Gün", description=f"{days} gün premium.", payload=f"premium_{uid}_{days}", provider_token="", currency="XTR", prices=[{"label": "Premium", "amount": stars}])
     except Exception as e:
-        await q.edit_message_text(f"❌ Hata: {e}")
+        await q.edit_message_text(f"❌ Ödeme sistemi hatası: {e}")
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -243,7 +272,7 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message; parts = msg.successful_payment.invoice_payload.split("_")
     global_state["premium"][parts[1]] = time.time() + int(parts[2]) * 86400
-    await sync_data(context)
+    save_local_state()
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,7 +296,6 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
 application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
-application.add_handler(CallbackQueryHandler(add_bot, pattern="^add_bot$"))
 application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
 application.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
 application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
@@ -275,7 +303,6 @@ application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
 application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
@@ -283,18 +310,16 @@ application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_pa
 # --- Bot Asenkron Döngüsü ---
 def run_bot_async_loop(loop):
     asyncio.set_event_loop(loop)
-    # Uygulamayı başlat (handler'ları ve kuyruğu hazırlar)
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
-    # Kuyruğu işleyen döngüyü başlat
     loop.run_forever()
 
 if __name__ == "__main__":
-    # Bot asenkron döngüsünü arka planda çalıştır
+    # Bot thread'ini başlat
     bot_thread = threading.Thread(target=run_bot_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
     
-    # Telegram'a Webhook adresini bildir
+    # Webhook'u Telegram'a bildir
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
         try:
@@ -303,6 +328,6 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Webhook ayarlanamadı: {e}")
     
-    # Flask'ı çalıştır
+    # Flask'ı başlat
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
