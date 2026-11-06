@@ -139,11 +139,15 @@ def stop_bot_process(proc_key):
         return True
     return False
 
-# --- Handler'lar ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user; uid = str(user.id)
-    global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-    save_state()
+# --- Ana Menü Fonksiyonu (Hem /start hem Callback için çalışır) ---
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Eğer komutla (/start) gelindiyse kullanıcıyı kaydet
+    if update.message:
+        uid = str(user.id)
+        global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
+        save_state()
     
     keyboard = []
     if user.id == ADMIN_ID:
@@ -151,11 +155,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
     
-    await update.message.reply_text(
-        f"👋 Merhaba {user.first_name}!\n\n"
-        f"Botunu çalıştırmak için '.py' dosyanı buraya gönder.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    text = f"👋 Merhaba {user.first_name}!\n\nBotunu çalıştırmak için '.py' dosyanı buraya gönder."
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Eğer mesaj komutla geldiyse yeni mesaj at, butonla geldiyse mesajı düzenle
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_main_menu(update, context)
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -188,13 +198,11 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i+1}. `{running_procs[pk]['name']}` - {st}\n"
         
         if running_procs[pk]["proc"].poll() is None:
-            # Bot çalışıyorsa durdur butonu göster
             keyboard.append([
                 premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
                 premium_button(f"Durdur", f"stop_{pk}", "⏹", "danger")
             ])
         else:
-            # Bot durmuşsa başlat ve sil butonu göster
             keyboard.append([
                 premium_button(f"Log Al", f"log_{pk}", "📃", "primary"),
                 premium_button(f"Başlat", f"start_{pk}", "▶", "success"),
@@ -211,7 +219,6 @@ async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pk in running_procs:
         info = running_procs[pk]
         bot_dir = DATA_DIR / "user_bots" / info["user_id"]
-        # Botun kodunu tekrar çalıştır
         script_path = bot_dir / f"bot_{pk}.py"
         log_path = info["log_path"]
         
@@ -232,7 +239,6 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pk in running_procs:
         info = running_procs[pk]
         name = info["name"]
-        # Durmuşsa önce durdur
         if info["proc"].poll() is None:
             info["proc"].terminate()
         del running_procs[pk]
@@ -240,7 +246,6 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await q.edit_message_text("❌ Bot zaten yok.")
 
-# --- Dosya Yükleme ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     doc = update.message.document
@@ -273,13 +278,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data[f"name_{user.id}"] = bot_name
     
     if is_premium(user.id):
-        # Premium ise anında başlat
         global_state["bot_codes"][str(user.id)] = code
         save_state()
         pk = start_bot_process(str(user.id), extracted_token, code, bot_name)
         await update.message.reply_text(f"✅ **Premium Üye:** Dosyanız onay beklenmeden başlatıldı!\nBot Adı: `{bot_name}`", parse_mode="Markdown")
     else:
-        # Ücretsiz ise admin onayına gönder
         await context.bot.send_document(
             chat_id=ADMIN_ID, document=doc.file_id,
             caption=f"📥 **Dosya Onayı (Ücretsiz Üye)**\n\n"
@@ -386,11 +389,8 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: 
         await q.edit_message_text("❌ Bot yok.")
 
-async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); await start(update, context)
-
 # --- Handler Kayıtları ---
-application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
 application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
@@ -402,7 +402,8 @@ application.add_handler(CallbackQueryHandler(start_stopped_bot, pattern="^start_
 application.add_handler(CallbackQueryHandler(delete_bot, pattern="^del_"))
 application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
-application.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
+# Geri butonu artık özel show_main_menu fonksiyonuna gidiyor
+application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
