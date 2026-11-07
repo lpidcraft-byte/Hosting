@@ -8,6 +8,7 @@ import logging
 import asyncio
 import threading
 import requests
+import html
 from pathlib import Path
 from flask import Flask, request, Response
 
@@ -22,13 +23,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "9053394489:AAEMkxfOuDRVTcTY4mWluMgNdDbj
 ADMIN_ID = 8913966694
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-# Zorunlu Kanallar
 REQUIRED_CHANNELS = [
     {"id": -1003947388912, "link": "https://t.me/+3A7s7kVfaoMxYjM0", "name": "𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 𝗧𝗘𝗔𝗠 #𝐊𝐫𝐚𝐥𝐥𝐢𝐤"},
     {"id": -1004443368027, "link": "https://t.me/vantoriumchat", "name": "𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 TEAM sohbet"}
 ]
 
-# Senin Verdiğin Emoji ID'leri
 EMOJI_IDS = {
     "👋": 5454390891466726015, "👍": 5456267427102858366, "⚠": 5879449820338330922,
     "👮‍♀": 5818678700274617758, "👮": 5818678700274617758,
@@ -108,7 +107,6 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
         kw["style"] = style
     return InlineKeyboardButton(**kw)
 
-# Metindeki tüm emojileri özel yapan fonksiyon
 def parse_entities(text: str):
     entities = []
     for emoji_char, emoji_id in EMOJI_IDS.items():
@@ -157,7 +155,9 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        except: pass
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -206,7 +206,6 @@ def stop_bot_process(proc_key):
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
     if update.message:
         uid = str(user.id)
         global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
@@ -215,7 +214,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
-    
     keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
     keyboard.append([premium_button("Pip İndir", "pip_menu", "📦", "primary")])
@@ -233,12 +231,15 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Botunu çalıştırmak için `.py` uzantılı dosyanı buraya gönder."
     )
     reply_markup = InlineKeyboardMarkup(keyboard)
-    entities = parse_entities(text) # Özel emojileri hazırla
+    entities = parse_entities(text)
     
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup, entities=entities)
     elif update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, entities=entities)
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, entities=entities)
+        except Exception as e:
+            logger.error(f"Menü hatası: {e}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -253,7 +254,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "👮‍♀ **Admin Paneli**\n\nAşağıdaki işlemlerden birini seçebilirsin:"
     keyboard = [[premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], [premium_button("Geri", "back_start", "↩", "danger")]]
     entities = parse_entities(text)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except: pass
 
 async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -263,7 +266,9 @@ async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ps = "💎" if is_premium(uid) else ""
         text += f"🆔 `{uid}` | @{info.get('username','yok')} | {info.get('first_name','')} {ps}\n"
     entities = parse_entities(text)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
+    except: pass
 
 async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -273,7 +278,9 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bl:
         text = "🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder."
         entities = parse_entities(text)
-        return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), entities=entities)
+        try:
+            return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), entities=entities)
+        except: return
     
     keyboard = []
     text = "🤖 **Aktif Botlarınız**\n\n"
@@ -289,7 +296,10 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([premium_button(f"Sil: {running_procs[pk]['name']}", f"del_{pk}", "🗑", "danger")])
     keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
     entities = parse_entities(text)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except Exception as e:
+        logger.error(f"Bot listesi hatası: {e}")
 
 async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -306,7 +316,9 @@ async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[premium_button("Geri", "back_start", "↩", "danger")]]
     context.user_data["awaiting_pip_package"] = True
     entities = parse_entities(text)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except: pass
 
 def install_pip_background(package_name, chat_id, context):
     try:
@@ -338,9 +350,15 @@ async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_file = open(info["log_path"], "a", encoding="utf-8")
             proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": info["token"]})
             running_procs[pk]["proc"] = proc
-            await q.edit_message_text(f"▶ Bot yeniden başlatıldı: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-        else: await q.edit_message_text("❌ Bot dosyası bulunamadı.")
-    else: await q.edit_message_text("❌ Bot bulunamadı.")
+            try:
+                await q.edit_message_text(f"▶ Bot yeniden başlatıldı: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+            except: pass
+        else: 
+            try: await q.edit_message_text("❌ Bot dosyası bulunamadı.")
+            except: pass
+    else: 
+        try: await q.edit_message_text("❌ Bot bulunamadı.")
+        except: pass
 
 async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -349,8 +367,12 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = running_procs[pk]
         if info["proc"].poll() is None: info["proc"].terminate()
         del running_procs[pk]
-        await q.edit_message_text(f"🗑 Bot silindi: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-    else: await q.edit_message_text("❌ Bot zaten yok.")
+        try:
+            await q.edit_message_text(f"🗑 Bot silindi: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+        except: pass
+    else: 
+        try: await q.edit_message_text("❌ Bot zaten yok.")
+        except: pass
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; doc = update.message.document
@@ -395,17 +417,23 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if code and token:
         global_state["bot_codes"][user_id] = code; save_state()
         pk = start_bot_process(user_id, token, code, name)
-        await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
+        try:
+            await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
+        except: pass
         try:
             await context.bot.send_message(chat_id=int(user_id), text="✅ **Sevgili kullanıcı,**\n\nDosyanız moderatörler tarafından incelendi ve aksilik tespit edilmedi, dosyanız çalışır halde, iyi kullanımlar!")
         except: pass
-    else: await q.edit_message_caption("❌ Hata.")
+    else: 
+        try: await q.edit_message_caption("❌ Hata.")
+        except: pass
 
 async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("reject_", "")
-    await q.edit_message_caption("❌ Reddedildi.")
+    try:
+        await q.edit_message_caption("❌ Reddedildi.")
+    except: pass
     try:
         await context.bot.send_message(chat_id=int(user_id), text="❌ **Sevgili kullanıcı,**\n\nMaalesef dosyanız moderatörler tarafından incelendi ve bir aksilik çıkarak reddedildi.")
     except: pass
@@ -429,7 +457,9 @@ async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [premium_button("Geri", "back_start", "↩", "danger")]
     ]
     entities = parse_entities(text)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except: pass
 
 async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); uid = str(q.from_user.id); days = int(q.data.replace("premium_", ""))
@@ -437,7 +467,8 @@ async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_
     try:
         await context.bot.send_invoice(chat_id=q.from_user.id, title=f"Premium - {days} Gün", description=f"{days} gün premium.", payload=f"premium_{uid}_{days}", provider_token="", currency="XTR", prices=[{"label": "Premium", "amount": stars}])
     except Exception as e:
-        await q.edit_message_text(f"❌ Hata: {e}")
+        try: await q.edit_message_text(f"❌ Hata: {e}")
+        except: pass
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -448,21 +479,57 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_state()
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
+# --- LOG GÖRÜNTÜLEME (Düzeltildi) ---
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); pk = q.data.replace("log_", "")
-    if pk not in running_procs: return await q.edit_message_text("❌ Bot yok.")
+    q = update.callback_query
+    await q.answer()  # Yükleniyor animasyonunu durdur
+    
+    pk = q.data.replace("log_", "")
+    if pk not in running_procs:
+        try: await q.edit_message_text("❌ Bot bulunamadı.")
+        except: pass
+        return
+    
     try:
-        with open(running_procs[pk]["log_path"], "r", encoding="utf-8", errors="ignore") as f: content = f.read()[-3000:]
-    except: content = "Log yok."
-    await q.edit_message_text(f"📃 **Log: {running_procs[pk]['name']}**\n\n```\n{content}\n```", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="Markdown")
+        with open(running_procs[pk]["log_path"], "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()[-3000:]
+        if not content.strip():
+            content = "Henüz log kaydı yok."
+    except:
+        content = "Log okunamadı."
+    
+    # Logu HTML içine alarak özel karakterlerin patlamasını önlüyoruz
+    safe_content = html.escape(content)
+    text = f"📃 <b>Log: {running_procs[pk]['name']}</b>\n\n<pre>{safe_content}</pre>"
+    
+    try:
+        await q.edit_message_text(
+            text, 
+            reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Log edit hatası: {e}")
+        # Eğer mesaj düzenlenemezse yeni mesaj at
+        try:
+            await context.bot.send_message(
+                chat_id=q.from_user.id, 
+                text=text, 
+                reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]),
+                parse_mode="HTML"
+            )
+        except: pass
 
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); pk = q.data.replace("stop_", "")
     if stop_bot_process(pk): 
-        await q.edit_message_text(f"🔴 Bot durduruldu.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
-    else: await q.edit_message_text("❌ Bot yok.")
+        try:
+            await q.edit_message_text(f"🔴 Bot durduruldu.", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+        except: pass
+    else: 
+        try: await q.edit_message_text("❌ Bot yok.")
+        except: pass
 
-# --- Handler Kayıtları ---
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
