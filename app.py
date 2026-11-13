@@ -9,6 +9,7 @@ import asyncio
 import threading
 import requests
 import html
+import base64
 from pathlib import Path
 from flask import Flask, request, Response
 
@@ -214,6 +215,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     if user.id == ADMIN_ID:
         keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
+    keyboard.append([premium_button("GitHub'dan Bot Aktif Et", "github_start", "🌐", "success")])
     keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
     keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
     keyboard.append([premium_button("Pip İndir", "pip_menu", "📦", "primary")])
@@ -223,6 +225,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 **Merhaba {user.first_name}!**\n\n"
         "🤖 **VDS Bot Hosting Hizmeti**\n"
         "Kendi botlarını 7/24 çalıştır, loglarını anlık görüntüle.\n\n"
+        "🌐 **GitHub Desteği**\n"
+        "GitHub repo URL'ni gönder, içindeki botu otomatik bulup çalıştıralım.\n\n"
         "📦 **Pip Desteği**\n"
         "Eksik modülleri tek tıkla yükle, hata almadan botunu çalıştır.\n\n"
         "💎 **Premium Avantajları**\n"
@@ -276,7 +280,7 @@ async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bl = [k for k in running_procs if k.startswith(uid + "_")]
     
     if not bl:
-        text = "🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder."
+        text = "🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder veya GitHub URL'si ile aktif et."
         entities = parse_entities(text)
         try:
             return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), entities=entities)
@@ -374,6 +378,159 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await q.edit_message_text("❌ Bot zaten yok.")
         except: pass
 
+# --- GITHUB URL İLE BOT AKTİF ETME ---
+async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    context.user_data["awaiting_github_url"] = True
+    text = (
+        "🌐 **GitHub'dan Bot Aktif Etme**\n\n"
+        "GitHub repo URL'sini gönder. Örnek:\n"
+        "`https://github.com/kullanici/repo`\n\n"
+        "🔍 Repo içindeki `.py` dosyaları taranır, içinde geçerli Telegram token olan dosya bulunur ve bot doğrulanarak çalıştırılır.\n\n"
+        "⚠️ Token'ın şu formatta olmalı: `123456789:AA...`\n\n"
+        "👇 URL'yi mesaj olarak yaz."
+    )
+    keyboard = [[premium_button("Geri", "back_start", "↩", "danger")]]
+    entities = parse_entities(text)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except: pass
+
+def github_repo_api(url):
+    """GitHub URL'sinden API endpoint üret"""
+    url = url.strip().rstrip("/")
+    # https://github.com/user/repo veya https://github.com/user/repo/tree/branch
+    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)(?:/tree/([^/]+))?", url)
+    if not m:
+        return None, None, None
+    user, repo, branch = m.group(1), m.group(2), m.group(3)
+    return user, repo, branch
+
+def fetch_github_files(user, repo, branch=None):
+    """Repo içeriğini GitHub API ile getir"""
+    headers = {"Accept": "application/vnd.github+json"}
+    if branch is None:
+        # varsayılan branch'i öğren
+        r = requests.get(f"https://api.github.com/repos/{user}/{repo}", headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None, f"Repo bulunamadı veya erişilemedi (HTTP {r.status_code})"
+        branch = r.json().get("default_branch", "main")
+    r = requests.get(f"https://api.github.com/repos/{user}/{repo}/git/trees/{branch}?recursive=1", headers=headers, timeout=20)
+    if r.status_code != 200:
+        return None, f"Dosya listesi alınamadı (HTTP {r.status_code})"
+    return r.json().get("tree", []), None
+
+def download_github_file(user, repo, branch, path):
+    """Tek dosyayı raw olarak indir"""
+    url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+    r = requests.get(url, timeout=20)
+    if r.status_code == 200:
+        return r.text
+    return None
+
+def extract_and_validate_token(code):
+    """Kod içinden geçerli Telegram token bul ve doğrula"""
+    # Rakamla başlayıp harf/rakam/altçizgi/tire ile devam eden token formatı
+    matches = re.findall(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code)
+    for token in matches:
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+            data = r.json()
+            if data.get("ok"):
+                bot_info = data["result"]
+                return token, bot_info.get("first_name", "Bot"), bot_info.get("username", "")
+        except:
+            continue
+    return None, None, None
+
+async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_github_url"):
+        return
+    context.user_data["awaiting_github_url"] = False
+    url = update.message.text.strip()
+    user_id = update.effective_user.id
+    uid = str(user_id)
+    
+    if not check_bot_limit(uid):
+        return await update.message.reply_text("⚠️ Bot limitin doldu! Premium alman lazım.")
+    
+    user, repo, branch = github_repo_api(url)
+    if not user:
+        return await update.message.reply_text("❌ Geçersiz GitHub URL. Örnek: `https://github.com/kullanici/repo`", parse_mode="Markdown")
+    
+    msg = await update.message.reply_text("🔍 Repo taranıyor, lütfen bekle...")
+    
+    # Arka planda işle
+    def process():
+        try:
+            files, err = fetch_github_files(user, repo, branch)
+            if err:
+                asyncio.run_coroutine_threadsafe(msg.edit_text(f"❌ {err}"), bot_loop)
+                return
+            
+            py_files = [f for f in files if f["type"] == "blob" and f["path"].endswith(".py")]
+            if not py_files:
+                asyncio.run_coroutine_threadsafe(msg.edit_text("❌ Repo içinde `.py` dosyası bulunamadı."), bot_loop)
+                return
+            
+            asyncio.run_coroutine_threadsafe(msg.edit_text(f"📂 {len(py_files)} Python dosyası bulundu, token aranıyor..."), bot_loop)
+            
+            found = None
+            for f in py_files[:30]:  # max 30 dosya tara
+                content = download_github_file(user, repo, branch or "main", f["path"])
+                if not content:
+                    continue
+                token, bot_name, bot_username = extract_and_validate_token(content)
+                if token:
+                    found = (f["path"], content, token, bot_name, bot_username)
+                    break
+            
+            if not found:
+                asyncio.run_coroutine_threadsafe(msg.edit_text("❌ Repo içinde geçerli Telegram token içeren `.py` dosyası bulunamadı.\n\nToken formatı: `123456789:AA...`"), bot_loop)
+                return
+            
+            path, code, token, bot_name, bot_username = found
+            
+            # Bot doğrulandı, çalıştır
+            name = f"{bot_name} (@{bot_username})"
+            pk = start_bot_process(uid, token, code, name)
+            
+            premium_msg = "✅ **Premium Üye:** Bot anında başlatıldı!" if is_premium(uid) else "📥 **Admin onayına gönderildi.**"
+            
+            if not is_premium(uid):
+                # Admin'e onay için gönder
+                global_state["bot_codes"][uid] = code; save_state()
+                context.bot_data[f"code_{uid}"] = code
+                context.bot_data[f"token_{uid}"] = token
+                context.bot_data[f"name_{uid}"] = name
+                asyncio.run_coroutine_threadsafe(
+                    context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"📥 **GitHub Bot Onayı**\n\n👤 {update.effective_user.first_name}\n🆔 `{uid}`\n🤖 Bot: {name}\n🔗 Repo: {url}\n📄 Dosya: `{path}`\n🔑 Token: `{token}`",
+                        reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{uid}", "✅", "success"), premium_button("Reddet", f"reject_{uid}", "❌", "danger")]]),
+                        parse_mode="Markdown"
+                    ), bot_loop
+                )
+            
+            result_text = (
+                f"✅ **Bot Başarıyla Aktif Edildi!**\n\n"
+                f"🤖 **Bot Adı:** {bot_name}\n"
+                f"👤 **Kullanıcı Adı:** @{bot_username}\n"
+                f"📄 **Dosya:** `{path}`\n"
+                f"🔑 **Token:** `{token[:15]}...`\n\n"
+                f"{premium_msg}"
+            )
+            asyncio.run_coroutine_threadsafe(
+                msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Git", "my_bots", "🤖", "primary")]]), parse_mode="Markdown"),
+                bot_loop
+            )
+        except Exception as e:
+            logger.error(f"GitHub işlem hatası: {e}")
+            asyncio.run_coroutine_threadsafe(msg.edit_text(f"❌ Hata: {e}"), bot_loop)
+    
+    threading.Thread(target=process, daemon=True).start()
+
+# --- DOSYA İLE BOT AKTİF ETME ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; doc = update.message.document
     if not doc.file_name.endswith(".py"): return await update.message.reply_text("❌ Sadece `.py` dosyaları kabul edilir.")
@@ -383,7 +540,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmp = DATA_DIR / f"tmp_{user.id}.py"
     await file.download_to_drive(tmp)
     code = tmp.read_text(encoding="utf-8", errors="ignore")
-    token_match = re.search(r"(\d+:[A-Za-z0-9_-]+)", code)
+    token_match = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code)
     
     if not token_match: return await update.message.reply_text("❌ Dosyada geçerli bir token bulunamadı!")
     extracted_token = token_match.group(1).strip().strip("'\"")
@@ -479,10 +636,9 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_state()
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
-# --- LOG GÖRÜNTÜLEME (Düzeltildi) ---
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()  # Yükleniyor animasyonunu durdur
+    await q.answer()
     
     pk = q.data.replace("log_", "")
     if pk not in running_procs:
@@ -498,7 +654,6 @@ async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         content = "Log okunamadı."
     
-    # Logu HTML içine alarak özel karakterlerin patlamasını önlüyoruz
     safe_content = html.escape(content)
     text = f"📃 <b>Log: {running_procs[pk]['name']}</b>\n\n<pre>{safe_content}</pre>"
     
@@ -510,7 +665,6 @@ async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Log edit hatası: {e}")
-        # Eğer mesaj düzenlenemezse yeni mesaj at
         try:
             await context.bot.send_message(
                 chat_id=q.from_user.id, 
@@ -538,6 +692,7 @@ application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
 application.add_handler(CallbackQueryHandler(pip_menu, pattern="^pip_menu$"))
 application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
 application.add_handler(CallbackQueryHandler(handle_premium_purchase, pattern="^premium_"))
+application.add_handler(CallbackQueryHandler(github_start, pattern="^github_start$"))
 application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
 application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
 application.add_handler(CallbackQueryHandler(start_stopped_bot, pattern="^start_"))
@@ -546,6 +701,8 @@ application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 
+# ÖNEMLİ: GitHub URL handler pip'ten ÖNCE olmalı
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r"^https?://github\.com/"), handle_github_url))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pip_input))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
