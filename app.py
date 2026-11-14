@@ -22,8 +22,6 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "9053394489:AAEMkxfOuDRVTcTY4mWluMgNdDbj-Y9ryMY")
 ADMIN_ID = 8913966694
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
-
-# GitHub API Token - 403 hatasını çözer (5000 istek/saat)
 GITHUB_API_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
 
 REQUIRED_CHANNELS = [
@@ -346,15 +344,6 @@ def install_pip_background(package_name, chat_id, context):
     except Exception as e:
         asyncio.run_coroutine_threadsafe(context.bot.send_message(chat_id=chat_id, text=f"❌ İşlem hatası: {e}"), bot_loop)
 
-async def handle_pip_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_pip_package"): return
-    package_name = update.message.text.strip()
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
-        return await update.message.reply_text("❌ Geçersiz paket adı!")
-    context.user_data["awaiting_pip_package"] = False
-    await update.message.reply_text(f"⏳ `{package_name}` arka planda yükleniyor...", parse_mode="Markdown")
-    threading.Thread(target=install_pip_background, args=(package_name, update.effective_chat.id, context)).start()
-
 async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     pk = q.data.replace("start_", "")
@@ -415,7 +404,7 @@ async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def github_repo_api(url):
     url = url.strip().rstrip("/")
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)(?:/tree/([^/]+))?", url)
+    m = re.match(r"https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)(?:/tree/([^/\s]+))?", url)
     if not m:
         return None, None, None
     return m.group(1), m.group(2), m.group(3)
@@ -541,70 +530,91 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     threading.Thread(target=process, daemon=True).start()
 
 
-async def handle_build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = context.user_data.get("github_data")
-    if not data or data.get("step") != "build":
-        return
+# --- TEK BİR TEXT HANDLER (hepsini yönetir) ---
+async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tüm text mesajlarını duruma göre yönlendirir."""
+    text = (update.message.text or "").strip()
+    ud = context.user_data
     
-    build_cmd = update.message.text.strip()
-    if build_cmd.lower() == "yok":
-        build_cmd = ""
+    # 1. GitHub URL bekleniyor mu?
+    if ud.get("awaiting_github_url"):
+        if re.match(r"https?://(?:www\.)?github\.com/[^\s]+", text):
+            await handle_github_url(update, context)
+            return
+        else:
+            await update.message.reply_text("❌ Geçersiz URL. Örnek: `https://github.com/kullanici/repo`", parse_mode="Markdown")
+            return
     
-    data["build_cmd"] = build_cmd
-    data["step"] = "start"
-    
-    await update.message.reply_text(
-        f"🛠 **Build Command:** `{build_cmd if build_cmd else 'Yok'}`\n\n"
-        f"🚀 **Start Command** girin (botu başlatmak için).\n"
-        f"Örnek: `python bot.py` veya `python main.py`\n\n"
-        f"Varsayılan için `yok` yazın.",
-        reply_markup=InlineKeyboardMarkup([[premium_button("İptal", "back_start", "❌", "danger")]]),
-        parse_mode="Markdown"
-    )
-
-
-async def handle_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = context.user_data.get("github_data")
-    if not data or data.get("step") != "start":
-        return
-    
-    start_cmd = update.message.text.strip()
-    if start_cmd.lower() == "yok":
-        start_cmd = ""
-    
-    context.user_data.pop("github_data", None)
-    uid = str(update.effective_user.id)
-    name = f"{data['bot_name']} (@{data['bot_username']})"
-    pk = start_bot_process(uid, data["token"], data["code"], name, data["build_cmd"], start_cmd)
-    
-    if is_premium(uid):
-        premium_msg = "✅ **Premium Üye:** Bot anında başlatıldı!"
-    else:
-        premium_msg = "📥 **Admin onayına gönderildi.**"
-        global_state["bot_codes"][uid] = data["code"]; save_state()
-        context.bot_data[f"code_{uid}"] = data["code"]
-        context.bot_data[f"token_{uid}"] = data["token"]
-        context.bot_data[f"name_{uid}"] = name
-        context.bot_data[f"build_{uid}"] = data["build_cmd"]
-        context.bot_data[f"start_{uid}"] = start_cmd
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📥 **GitHub Bot Onayı**\n\n👤 {update.effective_user.first_name}\n🆔 `{uid}`\n🤖 Bot: {name}\n🔗 Repo: {data['url']}\n📄 Dosya: `{data['path']}`\n🔑 Token: `{data['token']}`\n🛠 Build: `{data['build_cmd'] or 'Yok'}`\n🚀 Start: `{start_cmd or 'Varsayılan'}`",
-            reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{uid}", "✅", "success"), premium_button("Reddet", f"reject_{uid}", "❌", "danger")]]),
+    # 2. GitHub build command bekleniyor mu?
+    data = ud.get("github_data")
+    if data and data.get("step") == "build":
+        build_cmd = "" if text.lower() == "yok" else text
+        data["build_cmd"] = build_cmd
+        data["step"] = "start"
+        await update.message.reply_text(
+            f"🛠 **Build Command:** `{build_cmd if build_cmd else 'Yok'}`\n\n"
+            f"🚀 **Start Command** girin (botu başlatmak için).\n"
+            f"Örnek: `python bot.py` veya `python main.py`\n\n"
+            f"Varsayılan için `yok` yazın.",
+            reply_markup=InlineKeyboardMarkup([[premium_button("İptal", "back_start", "❌", "danger")]]),
             parse_mode="Markdown"
         )
+        return
     
-    await update.message.reply_text(
-        f"✅ **Bot Başarıyla Aktif Edildi!**\n\n"
-        f"🤖 **Bot Adı:** {data['bot_name']}\n"
-        f"👤 **Kullanıcı Adı:** @{data['bot_username']}\n"
-        f"📄 **Dosya:** `{data['path']}`\n"
-        f"🛠 **Build:** `{data['build_cmd'] or 'Yok'}`\n"
-        f"🚀 **Start:** `{start_cmd or 'Varsayılan'}`\n\n"
-        f"{premium_msg}",
-        reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Git", "my_bots", "🤖", "primary")]]),
-        parse_mode="Markdown"
-    )
+    # 3. GitHub start command bekleniyor mu?
+    if data and data.get("step") == "start":
+        start_cmd = "" if text.lower() == "yok" else text
+        ud.pop("github_data", None)
+        uid = str(update.effective_user.id)
+        name = f"{data['bot_name']} (@{data['bot_username']})"
+        start_bot_process(uid, data["token"], data["code"], name, data["build_cmd"], start_cmd)
+        
+        if is_premium(uid):
+            premium_msg = "✅ **Premium Üye:** Bot anında başlatıldı!"
+        else:
+            premium_msg = "📥 **Admin onayına gönderildi.**"
+            global_state["bot_codes"][uid] = data["code"]; save_state()
+            context.bot_data[f"code_{uid}"] = data["code"]
+            context.bot_data[f"token_{uid}"] = data["token"]
+            context.bot_data[f"name_{uid}"] = name
+            context.bot_data[f"build_{uid}"] = data["build_cmd"]
+            context.bot_data[f"start_{uid}"] = start_cmd
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"📥 **GitHub Bot Onayı**\n\n👤 {update.effective_user.first_name}\n🆔 `{uid}`\n🤖 Bot: {name}\n🔗 Repo: {data['url']}\n📄 Dosya: `{data['path']}`\n🔑 Token: `{data['token']}`\n🛠 Build: `{data['build_cmd'] or 'Yok'}`\n🚀 Start: `{start_cmd or 'Varsayılan'}`",
+                    reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{uid}", "✅", "success"), premium_button("Reddet", f"reject_{uid}", "❌", "danger")]]),
+                    parse_mode="Markdown"
+                )
+            except: pass
+        
+        await update.message.reply_text(
+            f"✅ **Bot Başarıyla Aktif Edildi!**\n\n"
+            f"🤖 **Bot Adı:** {data['bot_name']}\n"
+            f"👤 **Kullanıcı Adı:** @{data['bot_username']}\n"
+            f"📄 **Dosya:** `{data['path']}`\n"
+            f"🛠 **Build:** `{data['build_cmd'] or 'Yok'}`\n"
+            f"🚀 **Start:** `{start_cmd or 'Varsayılan'}`\n\n"
+            f"{premium_msg}",
+            reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Git", "my_bots", "🤖", "primary")]]),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # 4. Pip paket bekleniyor mu?
+    if ud.get("awaiting_pip_package"):
+        ud["awaiting_pip_package"] = False
+        package_name = text
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
+            await update.message.reply_text("❌ Geçersiz paket adı!")
+            return
+        await update.message.reply_text(f"⏳ `{package_name}` arka planda yükleniyor...", parse_mode="Markdown")
+        threading.Thread(target=install_pip_background, args=(package_name, update.effective_chat.id, context)).start()
+        return
+    
+    # 5. Beklenmeyen text - sessizce yoksay
+    return
+
 
 # --- DOSYA İLE BOT AKTİF ETME ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -779,11 +789,8 @@ application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 
-# Handler sırası: önce GitHub adımları, sonra genel text
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r"^https?://github\.com/"), handle_github_url))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_build_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pip_input))
+# TEK text handler - hepsini yönetir
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_router))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
