@@ -381,11 +381,43 @@ async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await status.edit_text(f"⏳ Duyuru gönderiliyor... ({i+1}/{len(users)})")
             except: pass
-        await asyncio.sleep(0.05)  # rate limit
+        await asyncio.sleep(0.05) # rate limit
     
     try:
         await status.edit_text(f"✅ **Duyuru tamamlandı!**\n\n✅ Başarılı: {sent}\n❌ Başarısız: {failed}", reply_markup=InlineKeyboardMarkup([[premium_button("Admin Paneli", "admin_panel", "↩", "primary")]]))
     except: pass
+
+# --- MY BOTS (Eksik olan ve hata veren fonksiyon) ---
+async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    uid = str(q.from_user.id)
+    bl = [k for k in running_procs if k.startswith(uid + "_")]
+    
+    if not bl:
+        text = "🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder veya GitHub URL'si ile aktif et."
+        entities = parse_entities(text)
+        try:
+            return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), entities=entities)
+        except: return
+    
+    keyboard = []
+    text = "🤖 **Aktif Botlarınız**\n\n"
+    for i, pk in enumerate(bl):
+        st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
+        text += f"📦 **{running_procs[pk]['name']}** - {st}\n"
+        if running_procs[pk]["proc"].poll() is None:
+            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
+            keyboard.append([premium_button(f"Durdur: {running_procs[pk]['name']}", f"stop_{pk}", "⏹", "danger")])
+        else:
+            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
+            keyboard.append([premium_button(f"Başlat: {running_procs[pk]['name']}", f"start_{pk}", "▶", "success")])
+            keyboard.append([premium_button(f"Sil: {running_procs[pk]['name']}", f"del_{pk}", "🗑", "danger")])
+    keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
+    entities = parse_entities(text)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    except Exception as e:
+        logger.error(f"Bot listesi hatası: {e}")
 
 async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -583,7 +615,6 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.run_coroutine_threadsafe(msg.edit_text(f"❌ Hata: {e}"), bot_loop)
     
     threading.Thread(target=process, daemon=True).start()
-
 
 # --- TEXT ROUTER ---
 async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
