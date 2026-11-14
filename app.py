@@ -62,7 +62,7 @@ def load_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except: pass
-    return {"users": {}, "premium": {}, "bot_codes": {}}
+    return {"users": {}, "premium": {}, "bot_codes": {}, "banned": []}
 
 def save_state():
     try:
@@ -72,6 +72,8 @@ def save_state():
         logger.error(f"Dosya kayıt hatası: {e}")
 
 global_state = load_state()
+if "banned" not in global_state:
+    global_state["banned"] = []
 running_procs = {}
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -124,6 +126,9 @@ def parse_entities(text: str):
 
 def is_premium(user_id):
     return global_state["premium"].get(str(user_id), 0) > time.time()
+
+def is_banned(user_id):
+    return str(user_id) in global_state.get("banned", [])
 
 def check_bot_limit(user_id):
     uid = str(user_id)
@@ -217,6 +222,17 @@ def stop_bot_process(proc_key):
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if is_banned(user.id):
+        text = "🚫 **Hesabınız Yasaklandı**\n\nBu botu kullanma yetkiniz kaldırılmıştır. Detaylı bilgi için admin ile iletişime geçin."
+        entities = parse_entities(text)
+        if update.message:
+            await update.message.reply_text(text, entities=entities)
+        elif update.callback_query:
+            try: await update.callback_query.edit_message_text(text, entities=entities)
+            except: pass
+        return
+    
     if update.message:
         uid = str(user.id)
         global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
@@ -257,6 +273,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if is_banned(user_id):
+        await show_main_menu(update, context)
+        return
     if not await check_membership(user_id):
         await send_join_message(update, context)
         return
@@ -266,7 +285,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return await q.edit_message_text("⛔ Yetkisiz.")
     text = "👮‍♀ **Admin Paneli**\n\nAşağıdaki işlemlerden birini seçebilirsin:"
-    keyboard = [[premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")], [premium_button("Geri", "back_start", "↩", "danger")]]
+    keyboard = [
+        [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary")],
+        [premium_button("Ban At", "ban_user", "🚫", "danger")],
+        [premium_button("Ban Kaldır", "unban_user", "✅", "success")],
+        [premium_button("Duyuru Yap", "broadcast", "📢", "primary")],
+        [premium_button("Geri", "back_start", "↩", "danger")]
+    ]
     entities = parse_entities(text)
     try:
         await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
@@ -278,42 +303,89 @@ async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "👥 **Kullanıcı Listesi**\n\n"
     for uid, info in list(global_state["users"].items())[:50]:
         ps = "💎" if is_premium(uid) else ""
-        text += f"🆔 `{uid}` | @{info.get('username','yok')} | {info.get('first_name','')} {ps}\n"
+        ban = "🚫" if is_banned(uid) else ""
+        text += f"🆔 `{uid}` | @{info.get('username','yok')} | {info.get('first_name','')} {ps}{ban}\n"
     entities = parse_entities(text)
     try:
         await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
     except: pass
 
-async def my_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- BAN / UNBAN ---
+async def ban_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    uid = str(q.from_user.id)
-    bl = [k for k in running_procs if k.startswith(uid + "_")]
-    
-    if not bl:
-        text = "🤖 **Bot Bulunamadı**\n\nHenüz bir bot yüklemedin. Çalıştırmak için `.py` dosyanı gönder veya GitHub URL'si ile aktif et."
-        entities = parse_entities(text)
-        try:
-            return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "back_start", "↩", "danger")]]), entities=entities)
-        except: return
-    
-    keyboard = []
-    text = "🤖 **Aktif Botlarınız**\n\n"
-    for i, pk in enumerate(bl):
-        st = "🟢 Çalışıyor" if running_procs[pk]["proc"].poll() is None else "🔴 Durdu"
-        text += f"📦 **{running_procs[pk]['name']}** - {st}\n"
-        if running_procs[pk]["proc"].poll() is None:
-            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
-            keyboard.append([premium_button(f"Durdur: {running_procs[pk]['name']}", f"stop_{pk}", "⏹", "danger")])
-        else:
-            keyboard.append([premium_button(f"Log Al: {running_procs[pk]['name']}", f"log_{pk}", "📃", "primary")])
-            keyboard.append([premium_button(f"Başlat: {running_procs[pk]['name']}", f"start_{pk}", "▶", "success")])
-            keyboard.append([premium_button(f"Sil: {running_procs[pk]['name']}", f"del_{pk}", "🗑", "danger")])
-    keyboard.append([premium_button("Geri", "back_start", "↩", "danger")])
+    if q.from_user.id != ADMIN_ID: return
+    context.user_data["awaiting_ban_id"] = True
+    text = (
+        "🚫 **Ban Atma**\n\n"
+        "Banlamak istediğin kullanıcının **ID'sini** gönder.\n\n"
+        "Örnek: `123456789`\n\n"
+        "İptal için **Geri** butonuna bas."
+    )
     entities = parse_entities(text)
     try:
-        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
-    except Exception as e:
-        logger.error(f"Bot listesi hatası: {e}")
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
+    except: pass
+
+async def unban_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.from_user.id != ADMIN_ID: return
+    banned_list = global_state.get("banned", [])
+    text = "✅ **Ban Kaldırma**\n\n"
+    if not banned_list:
+        text += "Şu an banlı kullanıcı yok."
+        try:
+            return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), parse_mode="Markdown")
+        except: return
+    text += f"Toplam **{len(banned_list)}** banlı kullanıcı:\n\n"
+    for bid in banned_list[:30]:
+        info = global_state["users"].get(bid, {})
+        text += f"🆔 `{bid}` | @{info.get('username','yok')}\n"
+    text += "\n👇 **Kaldırmak için ID yaz.**"
+    context.user_data["awaiting_unban_id"] = True
+    entities = parse_entities(text)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
+    except: pass
+
+# --- DUYURU ---
+async def broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.from_user.id != ADMIN_ID: return
+    context.user_data["awaiting_broadcast"] = True
+    total = len(global_state["users"])
+    text = (
+        "📢 **Duyuru Yap**\n\n"
+        f"👥 Toplam kullanıcı: **{total}**\n\n"
+        "Göndermek istediğin mesajı yaz. Bot tüm kullanıcılara gönderecek.\n\n"
+        "⚠️ Markdown desteklidir."
+    )
+    entities = parse_entities(text)
+    try:
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities)
+    except: pass
+
+async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg_text = update.message.text.strip()
+    context.user_data["awaiting_broadcast"] = False
+    users = list(global_state["users"].keys())
+    status = await update.message.reply_text(f"⏳ Duyuru gönderiliyor... (0/{len(users)})")
+    
+    sent, failed = 0, 0
+    for i, uid in enumerate(users):
+        try:
+            await context.bot.send_message(chat_id=int(uid), text=f"📢 **DUYURU**\n\n{msg_text}", parse_mode="Markdown")
+            sent += 1
+        except:
+            failed += 1
+        if (i + 1) % 10 == 0 or (i + 1) == len(users):
+            try:
+                await status.edit_text(f"⏳ Duyuru gönderiliyor... ({i+1}/{len(users)})")
+            except: pass
+        await asyncio.sleep(0.05)  # rate limit
+    
+    try:
+        await status.edit_text(f"✅ **Duyuru tamamlandı!**\n\n✅ Başarılı: {sent}\n❌ Başarısız: {failed}", reply_markup=InlineKeyboardMarkup([[premium_button("Admin Paneli", "admin_panel", "↩", "primary")]]))
+    except: pass
 
 async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -329,6 +401,7 @@ async def pip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = [[premium_button("Geri", "back_start", "↩", "danger")]]
     context.user_data["awaiting_pip_package"] = True
+    context.user_data.pop("awaiting_github_url", None)
     entities = parse_entities(text)
     try:
         await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
@@ -388,6 +461,7 @@ async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     context.user_data["awaiting_github_url"] = True
     context.user_data.pop("github_data", None)
+    context.user_data.pop("awaiting_pip_package", None)
     text = (
         "🌐 **GitHub'dan Bot Aktif Etme**\n\n"
         "GitHub repo URL'sini gönder. Örnek:\n"
@@ -419,29 +493,21 @@ def fetch_github_files(user, repo, branch=None):
     headers = github_headers()
     if branch is None:
         r = requests.get(f"https://api.github.com/repos/{user}/{repo}", headers=headers, timeout=15)
-        if r.status_code == 401:
-            return None, "GitHub token geçersiz."
-        if r.status_code == 403:
-            return None, "GitHub API rate limit aşıldı."
-        if r.status_code == 404:
-            return None, "Repo bulunamadı (404)."
-        if r.status_code != 200:
-            return None, f"Repo bilgisi alınamadı (HTTP {r.status_code})"
+        if r.status_code == 401: return None, "GitHub token geçersiz."
+        if r.status_code == 403: return None, "GitHub API rate limit aşıldı."
+        if r.status_code == 404: return None, "Repo bulunamadı (404)."
+        if r.status_code != 200: return None, f"Repo bilgisi alınamadı (HTTP {r.status_code})"
         branch = r.json().get("default_branch", "main")
     r = requests.get(f"https://api.github.com/repos/{user}/{repo}/git/trees/{branch}?recursive=1", headers=headers, timeout=20)
-    if r.status_code == 401:
-        return None, "GitHub token geçersiz."
-    if r.status_code == 403:
-        return None, "GitHub API rate limit aşıldı."
-    if r.status_code != 200:
-        return None, f"Dosya listesi alınamadı (HTTP {r.status_code})"
+    if r.status_code == 401: return None, "GitHub token geçersiz."
+    if r.status_code == 403: return None, "GitHub API rate limit aşıldı."
+    if r.status_code != 200: return None, f"Dosya listesi alınamadı (HTTP {r.status_code})"
     return r.json().get("tree", []), None
 
 def download_github_file(user, repo, branch, path):
     url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
     r = requests.get(url, timeout=20)
-    if r.status_code == 200:
-        return r.text
+    if r.status_code == 200: return r.text
     return None
 
 def extract_and_validate_token(code):
@@ -453,13 +519,11 @@ def extract_and_validate_token(code):
             if data.get("ok"):
                 bot_info = data["result"]
                 return token, bot_info.get("first_name", "Bot"), bot_info.get("username", "")
-        except:
-            continue
+        except: continue
     return None, None, None
 
 async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_github_url"):
-        return
+    if not context.user_data.get("awaiting_github_url"): return
     context.user_data["awaiting_github_url"] = False
     url = update.message.text.strip()
     user_id = update.effective_user.id
@@ -480,36 +544,28 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if err:
                 asyncio.run_coroutine_threadsafe(msg.edit_text(f"❌ {err}"), bot_loop)
                 return
-            
             py_files = [f for f in files if f["type"] == "blob" and f["path"].endswith(".py")]
             if not py_files:
                 asyncio.run_coroutine_threadsafe(msg.edit_text("❌ Repo içinde `.py` dosyası bulunamadı."), bot_loop)
                 return
-            
             asyncio.run_coroutine_threadsafe(msg.edit_text(f"📂 {len(py_files)} Python dosyası bulundu, token aranıyor..."), bot_loop)
-            
             found = None
             for f in py_files[:30]:
                 content = download_github_file(user, repo, branch or "main", f["path"])
-                if not content:
-                    continue
+                if not content: continue
                 token, bot_name, bot_username = extract_and_validate_token(content)
                 if token:
                     found = (f["path"], content, token, bot_name, bot_username)
                     break
-            
             if not found:
                 asyncio.run_coroutine_threadsafe(msg.edit_text("❌ Repo içinde geçerli Telegram token içeren `.py` dosyası bulunamadı.\n\nToken formatı: `123456789:AA...`"), bot_loop)
                 return
-            
             path, code, token, bot_name, bot_username = found
-            
             context.user_data["github_data"] = {
                 "url": url, "user": user, "repo": repo, "branch": branch or "main",
                 "path": path, "code": code, "token": token,
                 "bot_name": bot_name, "bot_username": bot_username, "step": "build"
             }
-            
             asyncio.run_coroutine_threadsafe(
                 msg.edit_text(
                     f"✅ **Bot Bulundu!**\n\n"
@@ -520,8 +576,7 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Yoksa `yok` yazın.",
                     reply_markup=InlineKeyboardMarkup([[premium_button("İptal", "back_start", "❌", "danger")]]),
                     parse_mode="Markdown"
-                ),
-                bot_loop
+                ), bot_loop
             )
         except Exception as e:
             logger.error(f"GitHub işlem hatası: {e}")
@@ -530,22 +585,58 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     threading.Thread(target=process, daemon=True).start()
 
 
-# --- TEK BİR TEXT HANDLER (hepsini yönetir) ---
+# --- TEXT ROUTER ---
 async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tüm text mesajlarını duruma göre yönlendirir."""
     text = (update.message.text or "").strip()
     ud = context.user_data
     
-    # 1. GitHub URL bekleniyor mu?
+    # Admin: ban id bekleniyor mu?
+    if ud.get("awaiting_ban_id"):
+        ud["awaiting_ban_id"] = False
+        if not text.isdigit():
+            return await update.message.reply_text("❌ Geçersiz ID. Sadece sayı gir.")
+        target_id = text
+        if target_id == str(ADMIN_ID):
+            return await update.message.reply_text("❌ Admini banlayamazsın.")
+        if target_id in global_state["banned"]:
+            return await update.message.reply_text("⚠️ Bu kullanıcı zaten banlı.")
+        global_state["banned"].append(target_id)
+        save_state()
+        try:
+            await context.bot.send_message(chat_id=int(target_id), text="🚫 **Hesabınız yasaklandı.**\n\nBu botu kullanma yetkiniz kaldırılmıştır.")
+        except: pass
+        return await update.message.reply_text(f"✅ Kullanıcı `{target_id}` banlandı.", reply_markup=InlineKeyboardMarkup([[premium_button("Admin Paneli", "admin_panel", "↩", "primary")]]), parse_mode="Markdown")
+    
+    # Admin: unban id bekleniyor mu?
+    if ud.get("awaiting_unban_id"):
+        ud["awaiting_unban_id"] = False
+        if not text.isdigit():
+            return await update.message.reply_text("❌ Geçersiz ID.")
+        target_id = text
+        if target_id in global_state["banned"]:
+            global_state["banned"].remove(target_id)
+            save_state()
+            try:
+                await context.bot.send_message(chat_id=int(target_id), text="✅ **Banınız kaldırıldı.**\n\nBotu tekrar kullanabilirsiniz.")
+            except: pass
+            return await update.message.reply_text(f"✅ Kullanıcı `{target_id}` banı kaldırıldı.", reply_markup=InlineKeyboardMarkup([[premium_button("Admin Paneli", "admin_panel", "↩", "primary")]]), parse_mode="Markdown")
+        else:
+            return await update.message.reply_text("❌ Bu kullanıcı banlı değil.")
+    
+    # Admin: duyuru metni bekleniyor mu?
+    if ud.get("awaiting_broadcast"):
+        await do_broadcast(update, context)
+        return
+    
+    # GitHub URL bekleniyor mu?
     if ud.get("awaiting_github_url"):
         if re.match(r"https?://(?:www\.)?github\.com/[^\s]+", text):
             await handle_github_url(update, context)
             return
         else:
-            await update.message.reply_text("❌ Geçersiz URL. Örnek: `https://github.com/kullanici/repo`", parse_mode="Markdown")
-            return
+            ud["awaiting_github_url"] = False
     
-    # 2. GitHub build command bekleniyor mu?
+    # GitHub build/start command
     data = ud.get("github_data")
     if data and data.get("step") == "build":
         build_cmd = "" if text.lower() == "yok" else text
@@ -561,7 +652,6 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
-    # 3. GitHub start command bekleniyor mu?
     if data and data.get("step") == "start":
         start_cmd = "" if text.lower() == "yok" else text
         ud.pop("github_data", None)
@@ -601,7 +691,7 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
-    # 4. Pip paket bekleniyor mu?
+    # Pip paket
     if ud.get("awaiting_pip_package"):
         ud["awaiting_pip_package"] = False
         package_name = text
@@ -611,14 +701,12 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"⏳ `{package_name}` arka planda yükleniyor...", parse_mode="Markdown")
         threading.Thread(target=install_pip_background, args=(package_name, update.effective_chat.id, context)).start()
         return
-    
-    # 5. Beklenmeyen text - sessizce yoksay
-    return
-
 
 # --- DOSYA İLE BOT AKTİF ETME ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; doc = update.message.document
+    if is_banned(user.id):
+        return await update.message.reply_text("🚫 Yasaklandınız, bot kullanamazsınız.")
     if not doc.file_name.endswith(".py"): return await update.message.reply_text("❌ Sadece `.py` dosyaları kabul edilir.")
     if not check_bot_limit(str(user.id)): return await update.message.reply_text("⚠️ Limit doldu! Premium alman lazım.")
     
@@ -662,8 +750,7 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if code and token:
         global_state["bot_codes"][user_id] = code; save_state()
         pk = start_bot_process(user_id, token, code, name, build_cmd, start_cmd)
-        try:
-            await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
+        try: await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
         except: pass
         try:
             await context.bot.send_message(chat_id=int(user_id), text="✅ **Sevgili kullanıcı,**\n\nDosyanız moderatörler tarafından incelendi ve aksilik tespit edilmedi, dosyanız çalışır halde, iyi kullanımlar!")
@@ -676,8 +763,7 @@ async def reject_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("reject_", "")
-    try:
-        await q.edit_message_caption("❌ Reddedildi.")
+    try: await q.edit_message_caption("❌ Reddedildi.")
     except: pass
     try:
         await context.bot.send_message(chat_id=int(user_id), text="❌ **Sevgili kullanıcı,**\n\nMaalesef dosyanız moderatörler tarafından incelendi ve bir aksilik çıkarak reddedildi.")
@@ -702,8 +788,7 @@ async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [premium_button("Geri", "back_start", "↩", "danger")]
     ]
     entities = parse_entities(text)
-    try:
-        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
+    try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities)
     except: pass
 
 async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -725,48 +810,31 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await msg.reply_text(f"✅ Premium aktif! {parts[2]} gün.")
 
 async def log_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    
+    q = update.callback_query; await q.answer()
     pk = q.data.replace("log_", "")
     if pk not in running_procs:
         try: await q.edit_message_text("❌ Bot bulunamadı.")
         except: pass
         return
-    
     try:
         with open(running_procs[pk]["log_path"], "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()[-3000:]
-        if not content.strip():
-            content = "Henüz log kaydı yok."
-    except:
-        content = "Log okunamadı."
-    
+        if not content.strip(): content = "Henüz log kaydı yok."
+    except: content = "Log okunamadı."
     safe_content = html.escape(content)
     text = f"📃 <b>Log: {running_procs[pk]['name']}</b>\n\n<pre>{safe_content}</pre>"
-    
     try:
-        await q.edit_message_text(
-            text, 
-            reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), 
-            parse_mode="HTML"
-        )
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Log edit hatası: {e}")
         try:
-            await context.bot.send_message(
-                chat_id=q.from_user.id, 
-                text=text, 
-                reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]),
-                parse_mode="HTML"
-            )
+            await context.bot.send_message(chat_id=q.from_user.id, text=text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "my_bots", "↩", "danger")]]), parse_mode="HTML")
         except: pass
 
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); pk = q.data.replace("stop_", "")
     if stop_bot_process(pk): 
-        try:
-            await q.edit_message_text(f"🔴 Bot durduruldu.", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
+        try: await q.edit_message_text(f"🔴 Bot durduruldu.", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
         except: pass
     else: 
         try: await q.edit_message_text("❌ Bot yok.")
@@ -776,6 +844,9 @@ application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
+application.add_handler(CallbackQueryHandler(ban_user_menu, pattern="^ban_user$"))
+application.add_handler(CallbackQueryHandler(unban_user_menu, pattern="^unban_user$"))
+application.add_handler(CallbackQueryHandler(broadcast_menu, pattern="^broadcast$"))
 application.add_handler(CallbackQueryHandler(my_bots, pattern="^my_bots$"))
 application.add_handler(CallbackQueryHandler(pip_menu, pattern="^pip_menu$"))
 application.add_handler(CallbackQueryHandler(buy_premium, pattern="^buy_premium$"))
@@ -789,7 +860,6 @@ application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 
-# TEK text handler - hepsini yönetir
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_router))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
