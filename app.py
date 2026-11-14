@@ -9,7 +9,6 @@ import asyncio
 import threading
 import requests
 import html
-import base64
 from pathlib import Path
 from flask import Flask, request, Response
 
@@ -23,6 +22,9 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "9053394489:AAEMkxfOuDRVTcTY4mWluMgNdDbj-Y9ryMY")
 ADMIN_ID = 8913966694
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+
+# GitHub API Token - 403 hatasını çözer (5000 istek/saat)
+GITHUB_API_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
 
 REQUIRED_CHANNELS = [
     {"id": -1003947388912, "link": "https://t.me/+3A7s7kVfaoMxYjM0", "name": "𝙑𝘼𝙉𝙏𝙊𝙍𝙄𝙐𝙈 𝗧𝗘𝗔𝗠 #𝐊𝐫𝐚𝐥𝐥𝐢𝐤"},
@@ -170,27 +172,37 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await q.answer("❌ Henüz tüm kanallara katılmadın!", show_alert=True)
 
-def start_bot_process(user_id, bot_token, code_content, bot_name="Bot"):
+def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", build_cmd="", start_cmd=""):
     uid = str(user_id)
     proc_key = f"{uid}_{int(time.time())}"
-    bot_dir = DATA_DIR / "user_bots" / uid
+    bot_dir = DATA_DIR / "user_bots" / uid / proc_key
     bot_dir.mkdir(parents=True, exist_ok=True)
     script_path = bot_dir / f"bot_{proc_key}.py"
     log_path = bot_dir / f"log_{proc_key}.txt"
     
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code_content)
-        
-    log_file = open(log_path, "w", encoding="utf-8")
+    
+    with open(log_path, "w", encoding="utf-8") as lf:
+        if build_cmd.strip():
+            try:
+                br = subprocess.run(build_cmd, shell=True, cwd=str(bot_dir), capture_output=True, text=True, timeout=300)
+                lf.write(f"[BUILD] {build_cmd}\n[OUT]\n{br.stdout}\n[ERR]\n{br.stderr}\n[RC] {br.returncode}\n\n")
+            except Exception as e:
+                lf.write(f"[BUILD HATA] {e}\n")
+    
+    log_file = open(log_path, "a", encoding="utf-8")
     env = {**os.environ, "BOT_TOKEN": bot_token}
-    proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
+    
+    if start_cmd.strip():
+        proc = subprocess.Popen(start_cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
+    else:
+        proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
+    
     running_procs[proc_key] = {
-        "proc": proc, 
-        "log_path": str(log_path), 
-        "token": bot_token, 
-        "started": time.time(), 
-        "user_id": uid,
-        "name": bot_name
+        "proc": proc, "log_path": str(log_path), "token": bot_token,
+        "started": time.time(), "user_id": uid, "name": bot_name,
+        "build_cmd": build_cmd, "start_cmd": start_cmd
     }
     return proc_key
 
@@ -348,11 +360,15 @@ async def start_stopped_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pk = q.data.replace("start_", "")
     if pk in running_procs:
         info = running_procs[pk]
-        bot_dir = DATA_DIR / "user_bots" / info["user_id"]
+        bot_dir = DATA_DIR / "user_bots" / info["user_id"] / pk
         script_path = bot_dir / f"bot_{pk}.py"
         if script_path.exists():
             log_file = open(info["log_path"], "a", encoding="utf-8")
-            proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env={**os.environ, "BOT_TOKEN": info["token"]})
+            env = {**os.environ, "BOT_TOKEN": info["token"]}
+            if info.get("start_cmd", "").strip():
+                proc = subprocess.Popen(info["start_cmd"], shell=True, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
+            else:
+                proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
             running_procs[pk]["proc"] = proc
             try:
                 await q.edit_message_text(f"▶ Bot yeniden başlatıldı: `{info['name']}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Dön", "my_bots", "↩", "primary")]]))
@@ -382,11 +398,12 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     context.user_data["awaiting_github_url"] = True
+    context.user_data.pop("github_data", None)
     text = (
         "🌐 **GitHub'dan Bot Aktif Etme**\n\n"
         "GitHub repo URL'sini gönder. Örnek:\n"
         "`https://github.com/kullanici/repo`\n\n"
-        "🔍 Repo içindeki `.py` dosyaları taranır, içinde geçerli Telegram token olan dosya bulunur ve bot doğrulanarak çalıştırılır.\n\n"
+        "🔍 Repo içindeki `.py` dosyaları taranır, içinde geçerli Telegram token olan dosya bulunur.\n\n"
         "⚠️ Token'ın şu formatta olmalı: `123456789:AA...`\n\n"
         "👇 URL'yi mesaj olarak yaz."
     )
@@ -397,31 +414,41 @@ async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 def github_repo_api(url):
-    """GitHub URL'sinden API endpoint üret"""
     url = url.strip().rstrip("/")
-    # https://github.com/user/repo veya https://github.com/user/repo/tree/branch
     m = re.match(r"https?://github\.com/([^/]+)/([^/]+)(?:/tree/([^/]+))?", url)
     if not m:
         return None, None, None
-    user, repo, branch = m.group(1), m.group(2), m.group(3)
-    return user, repo, branch
+    return m.group(1), m.group(2), m.group(3)
+
+def github_headers():
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_API_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_API_TOKEN}"
+    return headers
 
 def fetch_github_files(user, repo, branch=None):
-    """Repo içeriğini GitHub API ile getir"""
-    headers = {"Accept": "application/vnd.github+json"}
+    headers = github_headers()
     if branch is None:
-        # varsayılan branch'i öğren
         r = requests.get(f"https://api.github.com/repos/{user}/{repo}", headers=headers, timeout=15)
+        if r.status_code == 401:
+            return None, "GitHub token geçersiz."
+        if r.status_code == 403:
+            return None, "GitHub API rate limit aşıldı."
+        if r.status_code == 404:
+            return None, "Repo bulunamadı (404)."
         if r.status_code != 200:
-            return None, f"Repo bulunamadı veya erişilemedi (HTTP {r.status_code})"
+            return None, f"Repo bilgisi alınamadı (HTTP {r.status_code})"
         branch = r.json().get("default_branch", "main")
     r = requests.get(f"https://api.github.com/repos/{user}/{repo}/git/trees/{branch}?recursive=1", headers=headers, timeout=20)
+    if r.status_code == 401:
+        return None, "GitHub token geçersiz."
+    if r.status_code == 403:
+        return None, "GitHub API rate limit aşıldı."
     if r.status_code != 200:
         return None, f"Dosya listesi alınamadı (HTTP {r.status_code})"
     return r.json().get("tree", []), None
 
 def download_github_file(user, repo, branch, path):
-    """Tek dosyayı raw olarak indir"""
     url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
     r = requests.get(url, timeout=20)
     if r.status_code == 200:
@@ -429,8 +456,6 @@ def download_github_file(user, repo, branch, path):
     return None
 
 def extract_and_validate_token(code):
-    """Kod içinden geçerli Telegram token bul ve doğrula"""
-    # Rakamla başlayıp harf/rakam/altçizgi/tire ile devam eden token formatı
     matches = re.findall(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code)
     for token in matches:
         try:
@@ -460,7 +485,6 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     msg = await update.message.reply_text("🔍 Repo taranıyor, lütfen bekle...")
     
-    # Arka planda işle
     def process():
         try:
             files, err = fetch_github_files(user, repo, branch)
@@ -476,7 +500,7 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.run_coroutine_threadsafe(msg.edit_text(f"📂 {len(py_files)} Python dosyası bulundu, token aranıyor..."), bot_loop)
             
             found = None
-            for f in py_files[:30]:  # max 30 dosya tara
+            for f in py_files[:30]:
                 content = download_github_file(user, repo, branch or "main", f["path"])
                 if not content:
                     continue
@@ -491,37 +515,23 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             path, code, token, bot_name, bot_username = found
             
-            # Bot doğrulandı, çalıştır
-            name = f"{bot_name} (@{bot_username})"
-            pk = start_bot_process(uid, token, code, name)
+            context.user_data["github_data"] = {
+                "url": url, "user": user, "repo": repo, "branch": branch or "main",
+                "path": path, "code": code, "token": token,
+                "bot_name": bot_name, "bot_username": bot_username, "step": "build"
+            }
             
-            premium_msg = "✅ **Premium Üye:** Bot anında başlatıldı!" if is_premium(uid) else "📥 **Admin onayına gönderildi.**"
-            
-            if not is_premium(uid):
-                # Admin'e onay için gönder
-                global_state["bot_codes"][uid] = code; save_state()
-                context.bot_data[f"code_{uid}"] = code
-                context.bot_data[f"token_{uid}"] = token
-                context.bot_data[f"name_{uid}"] = name
-                asyncio.run_coroutine_threadsafe(
-                    context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"📥 **GitHub Bot Onayı**\n\n👤 {update.effective_user.first_name}\n🆔 `{uid}`\n🤖 Bot: {name}\n🔗 Repo: {url}\n📄 Dosya: `{path}`\n🔑 Token: `{token}`",
-                        reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{uid}", "✅", "success"), premium_button("Reddet", f"reject_{uid}", "❌", "danger")]]),
-                        parse_mode="Markdown"
-                    ), bot_loop
-                )
-            
-            result_text = (
-                f"✅ **Bot Başarıyla Aktif Edildi!**\n\n"
-                f"🤖 **Bot Adı:** {bot_name}\n"
-                f"👤 **Kullanıcı Adı:** @{bot_username}\n"
-                f"📄 **Dosya:** `{path}`\n"
-                f"🔑 **Token:** `{token[:15]}...`\n\n"
-                f"{premium_msg}"
-            )
             asyncio.run_coroutine_threadsafe(
-                msg.edit_text(result_text, reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Git", "my_bots", "🤖", "primary")]]), parse_mode="Markdown"),
+                msg.edit_text(
+                    f"✅ **Bot Bulundu!**\n\n"
+                    f"🤖 **Bot:** {bot_name} (@{bot_username})\n"
+                    f"📄 **Dosya:** `{path}`\n\n"
+                    f"🛠 **Build Command** girin (bağımlılık kurulumu).\n"
+                    f"Örnek: `pip install -r requirements.txt`\n\n"
+                    f"Yoksa `yok` yazın.",
+                    reply_markup=InlineKeyboardMarkup([[premium_button("İptal", "back_start", "❌", "danger")]]),
+                    parse_mode="Markdown"
+                ),
                 bot_loop
             )
         except Exception as e:
@@ -529,6 +539,72 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.run_coroutine_threadsafe(msg.edit_text(f"❌ Hata: {e}"), bot_loop)
     
     threading.Thread(target=process, daemon=True).start()
+
+
+async def handle_build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data.get("github_data")
+    if not data or data.get("step") != "build":
+        return
+    
+    build_cmd = update.message.text.strip()
+    if build_cmd.lower() == "yok":
+        build_cmd = ""
+    
+    data["build_cmd"] = build_cmd
+    data["step"] = "start"
+    
+    await update.message.reply_text(
+        f"🛠 **Build Command:** `{build_cmd if build_cmd else 'Yok'}`\n\n"
+        f"🚀 **Start Command** girin (botu başlatmak için).\n"
+        f"Örnek: `python bot.py` veya `python main.py`\n\n"
+        f"Varsayılan için `yok` yazın.",
+        reply_markup=InlineKeyboardMarkup([[premium_button("İptal", "back_start", "❌", "danger")]]),
+        parse_mode="Markdown"
+    )
+
+
+async def handle_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data.get("github_data")
+    if not data or data.get("step") != "start":
+        return
+    
+    start_cmd = update.message.text.strip()
+    if start_cmd.lower() == "yok":
+        start_cmd = ""
+    
+    context.user_data.pop("github_data", None)
+    uid = str(update.effective_user.id)
+    name = f"{data['bot_name']} (@{data['bot_username']})"
+    pk = start_bot_process(uid, data["token"], data["code"], name, data["build_cmd"], start_cmd)
+    
+    if is_premium(uid):
+        premium_msg = "✅ **Premium Üye:** Bot anında başlatıldı!"
+    else:
+        premium_msg = "📥 **Admin onayına gönderildi.**"
+        global_state["bot_codes"][uid] = data["code"]; save_state()
+        context.bot_data[f"code_{uid}"] = data["code"]
+        context.bot_data[f"token_{uid}"] = data["token"]
+        context.bot_data[f"name_{uid}"] = name
+        context.bot_data[f"build_{uid}"] = data["build_cmd"]
+        context.bot_data[f"start_{uid}"] = start_cmd
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"📥 **GitHub Bot Onayı**\n\n👤 {update.effective_user.first_name}\n🆔 `{uid}`\n🤖 Bot: {name}\n🔗 Repo: {data['url']}\n📄 Dosya: `{data['path']}`\n🔑 Token: `{data['token']}`\n🛠 Build: `{data['build_cmd'] or 'Yok'}`\n🚀 Start: `{start_cmd or 'Varsayılan'}`",
+            reply_markup=InlineKeyboardMarkup([[premium_button("Onayla", f"approve_{uid}", "✅", "success"), premium_button("Reddet", f"reject_{uid}", "❌", "danger")]]),
+            parse_mode="Markdown"
+        )
+    
+    await update.message.reply_text(
+        f"✅ **Bot Başarıyla Aktif Edildi!**\n\n"
+        f"🤖 **Bot Adı:** {data['bot_name']}\n"
+        f"👤 **Kullanıcı Adı:** @{data['bot_username']}\n"
+        f"📄 **Dosya:** `{data['path']}`\n"
+        f"🛠 **Build:** `{data['build_cmd'] or 'Yok'}`\n"
+        f"🚀 **Start:** `{start_cmd or 'Varsayılan'}`\n\n"
+        f"{premium_msg}",
+        reply_markup=InlineKeyboardMarkup([[premium_button("Botlarıma Git", "my_bots", "🤖", "primary")]]),
+        parse_mode="Markdown"
+    )
 
 # --- DOSYA İLE BOT AKTİF ETME ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -571,9 +647,11 @@ async def approve_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.from_user.id != ADMIN_ID: return
     user_id = q.data.replace("approve_", "")
     code = context.bot_data.get(f"code_{user_id}"); token = context.bot_data.get(f"token_{user_id}"); name = context.bot_data.get(f"name_{user_id}", "Bot")
+    build_cmd = context.bot_data.get(f"build_{user_id}", "")
+    start_cmd = context.bot_data.get(f"start_{user_id}", "")
     if code and token:
         global_state["bot_codes"][user_id] = code; save_state()
-        pk = start_bot_process(user_id, token, code, name)
+        pk = start_bot_process(user_id, token, code, name, build_cmd, start_cmd)
         try:
             await q.edit_message_caption(f"✅ Onaylandı.\nBot Adı: `{name}`", parse_mode="Markdown")
         except: pass
@@ -701,8 +779,10 @@ application.add_handler(CallbackQueryHandler(approve_file, pattern="^approve_"))
 application.add_handler(CallbackQueryHandler(reject_file, pattern="^reject_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 
-# ÖNEMLİ: GitHub URL handler pip'ten ÖNCE olmalı
+# Handler sırası: önce GitHub adımları, sonra genel text
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r"^https?://github\.com/"), handle_github_url))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_build_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pip_input))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
