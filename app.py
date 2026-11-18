@@ -103,7 +103,7 @@ IMPORTANT_LOGS_FILE = DATA_DIR / "important_logs.json"
 ORIGINAL_META_FILE = DATA_DIR / "original_meta.json"
 ORIGINAL_PHOTO_FILE = DATA_DIR / "original_photo.jpg"
 PENDING_APPROVALS = {}
-ACTIVE_MAIN_CONNECTIONS = {} # Main token bağlantı çakışma takibi
+ACTIVE_MAIN_CONNECTIONS = {}
 
 def load_state():
     default_state = {
@@ -153,33 +153,32 @@ def webhook():
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
         
-        # MAIN TOKEN (Ana Bot) Üzerinde Aynı Anda Birden Fazla Bağlantı/İstek Kontrolü
-        client_ip = request.remote_addr or "Bilinmiyor"
-        now = time.time()
-        
-        # Son 3 saniye içinde gelen eşzamanlı istekleri takip et
-        global ACTIVE_MAIN_CONNECTIONS
-        ACTIVE_MAIN_CONNECTIONS = {ip: t for ip, t in ACTIVE_MAIN_CONNECTIONS.items() if now - t < 3.0}
-        
-        ACTIVE_MAIN_CONNECTIONS[client_ip] = now
-        
-        # Eğer aynı anda (3 saniye içinde) main token webhook'una 2 farklı IP'den / bağlantıdan istek gelirse
-        if len(ACTIVE_MAIN_CONNECTIONS) >= 2:
-            conflict_msg = (
-                f"🚨 <b>Ana Bot (Main Token) Mükerrer Bağlantı Tespiti!</b>\n\n"
-                f"🌐 <b>Tespit Edilen IP / Bağlantı Sayısı:</b> {len(ACTIVE_MAIN_CONNECTIONS)}\n"
-                f"⚡ Main tokende aynı anda birden fazla bağlantı algılandığı için şüpheli bağlantı derhal sonlandırıldı!"
-            )
-            try:
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
-                    "chat_id": ADMIN_ID,
-                    "text": conflict_msg,
-                    "parse_mode": "HTML"
-                }, timeout=3)
-            except: pass
-            
-            # Bağlantıyı kes ve sonlandır
-            return Response("Main Token Connection Terminated", status=429)
+        # Sağlık kontrolü ve sistem pingleri filtrelendi, sadece gerçek kullanıcı etkileşimleri kontrol ediliyor
+        if update and update.effective_user:
+            uid = update.effective_user.id
+            now = time.time()
+            if uid != ADMIN_ID:
+                global ACTIVE_MAIN_CONNECTIONS
+                ACTIVE_MAIN_CONNECTIONS = {k: t for k, t in ACTIVE_MAIN_CONNECTIONS.items() if now - t < 3.0}
+                
+                # Kullanıcı bazlı eşzamanlı istek kontrolü
+                ACTIVE_MAIN_CONNECTIONS[uid] = now
+                
+                if len(ACTIVE_MAIN_CONNECTIONS) >= 3:
+                    conflict_msg = (
+                        f"🚨 <b>Ana Bot (Main Token) Mükerrer Bağlantı Tespiti!</b>\n\n"
+                        f"👤 <b>Son Kullanıcı ID:</b> <code>{uid}</code>\n"
+                        f"⚡ Aynı anda birden fazla farklı kullanıcıdan çakışmalı istek geldiği için bağlantı denetlendi."
+                    )
+                    try:
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
+                            "chat_id": ADMIN_ID,
+                            "text": conflict_msg,
+                            "parse_mode": "HTML"
+                        }, timeout=3)
+                    except: pass
+                    
+                    return Response("Connection Terminated", status=429)
 
         asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
         return Response("OK", status=200)
