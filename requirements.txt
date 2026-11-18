@@ -1,3 +1,4 @@
-python-telegram-bot[webhooks]==22.8
-Flask==3.0.3
+PySocks==1.7.1
+python-telegram-bot==21.10
+flask==3.1.0
 requests==2.32.3
