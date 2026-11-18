@@ -102,6 +102,7 @@ STATE_FILE = DATA_DIR / "state.json"
 MESSAGE_LOGS_FILE = DATA_DIR / "message_logs.json"
 ORIGINAL_META_FILE = DATA_DIR / "original_meta.json"
 ORIGINAL_PHOTO_FILE = DATA_DIR / "original_photo.jpg"
+PENDING_APPROVALS = {}
 
 def load_state():
     if STATE_FILE.exists():
@@ -146,6 +147,8 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
     else: kw["callback_data"] = callback_data
     if emoji in EMOJI_IDS: 
         kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
+    if style:
+        kw["style"] = style
     return InlineKeyboardButton.de_json(kw, application.bot)
 
 def parse_entities(text: str):
@@ -219,8 +222,6 @@ def protect_main_bot_identity_and_connections():
             if me_r.get("ok"): 
                 bot_user = me_r["result"] 
                 current_name = bot_user.get("first_name", "") 
-                
-                # Orijinal İsmi Kaydet / Koru
                 if ORIGINAL_META_FILE.exists(): 
                     try: 
                         with open(ORIGINAL_META_FILE, "r", encoding="utf-8") as f: 
@@ -231,11 +232,9 @@ def protect_main_bot_identity_and_connections():
                     original_name = current_name 
                     with open(ORIGINAL_META_FILE, "w", encoding="utf-8") as f: 
                         json.dump({"name": original_name}, f, ensure_ascii=False) 
-                
                 if current_name != original_name: 
                     requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName", json={"name": original_name}, timeout=10)
 
-            # Orijinal Profil Fotoğrafını (PP) Kaydet / Koru
             chat_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getChat?chat_id={MAIN_BOT_TOKEN.split(':')[0]}", timeout=10).json()
             if chat_r.get("ok"):
                 chat_info = chat_r["result"]
@@ -247,12 +246,10 @@ def protect_main_bot_identity_and_connections():
                         file_path = file_path_r["result"].get("file_path")
                         download_url = f"https://api.telegram.org/file/bot{MAIN_BOT_TOKEN}/{file_path}"
                         img_data = requests.get(download_url).content
-                        
                         if not ORIGINAL_PHOTO_FILE.exists():
                             with open(ORIGINAL_PHOTO_FILE, "wb") as pf:
                                 pf.write(img_data)
                         else:
-                            # Eğer PP dışarıdan değiştirildiyse anında ilk haline geri yükle
                             with open(ORIGINAL_PHOTO_FILE, "rb") as pf:
                                 original_img_bytes = pf.read()
                             if img_data != original_img_bytes:
@@ -300,7 +297,7 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await q.answer("Lütfen tüm kanallara katılın.", show_alert=True)
 
-def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", build_cmd="", start_cmd=""):
+def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", username="yok", file_name="bot.py", u_name=""):
     uid = str(user_id)
     proc_key = f"{uid}_{int(time.time())}"
     bot_dir = DATA_DIR / "user_bots" / uid / proc_key
@@ -311,25 +308,21 @@ def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", build_cm
     code_content = code_content.replace(MAIN_BOT_TOKEN, "9000000000:AABBBCCDDEEFFGGHHIIJJKKLMMNNOOPPQQRR") 
     with open(script_path, "w", encoding="utf-8") as f: 
         f.write(code_content) 
-    with open(log_path, "w", encoding="utf-8") as lf: 
-        if build_cmd.strip(): 
-            try: subprocess.run(build_cmd, shell=True, cwd=str(bot_dir), capture_output=True, text=True, timeout=300) 
-            except Exception: pass 
+    
     log_file = open(log_path, "a", encoding="utf-8") 
     env = {**os.environ, "BOT_TOKEN": bot_token} 
-    if start_cmd.strip(): 
-        proc = subprocess.Popen(start_cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env) 
-    else: 
-        proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env) 
+    proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env) 
+    
     running_procs[proc_key] = { 
         "proc": proc, 
         "log_path": str(log_path), 
-        "token": "GİZLİ", 
+        "token": bot_token, 
         "started": time.time(), 
         "user_id": uid, 
+        "user_fullname": u_name,
         "name": bot_name, 
-        "build_cmd": build_cmd, 
-        "start_cmd": start_cmd, 
+        "username": username,
+        "file_name": file_name,
         "script_path": str(script_path) 
     } 
     return proc_key 
@@ -368,7 +361,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([premium_button("Pip Yükleyici", "pip_menu", "📦", "primary")]) 
     
     prem_durum = "💎 Premium Üye" if is_premium(uid) else "👤 Standart Üye"
-    text = f"👋 Merhaba {user.first_name},\n\nDurum: {prem_durum}\nDosyanızı göndererek botunuzu anında çalıştırabilirsiniz." 
+    text = f"👋 Merhaba {user.first_name},\n\nDurum: {prem_durum}\nDosyanızı göndererek onay için admine iletebilirsiniz." 
     reply_markup = InlineKeyboardMarkup(keyboard) 
     entities = parse_entities(text) 
     if update.message: 
@@ -397,7 +390,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [premium_button("Ban At", "ban_user", "🚫", "danger"), premium_button("Ban Kaldır", "unban_user", "✅", "success")], 
         [premium_button("Duyuru", "broadcast", "📢", "primary")], 
         [premium_button("Premium Ver", "give_premium", "💎", "success"), premium_button("Premium Al", "revoke_premium", "❌", "danger")], 
-        [premium_button("Çalışan Botlar", "file_list", "📁", "primary")], 
+        [premium_button("Aktif Bot Listesi", "file_list", "📁", "primary")], 
         [premium_button("Geri", "back_start", "↩", "danger")] 
     ] 
     entities = parse_entities(text) 
@@ -438,12 +431,35 @@ async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def file_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
-    text = "📁 Aktif Botlar\n\n"
-    for i, (pk, info) in enumerate(running_procs.items(), 1):
-        text += f"{i}. {info['name']} - Token: GİZLİ\n"
+    
+    text = "📁 <b>Gerçek Aktif Bot Listesi ve Detayları</b>\n\n"
+    if not running_procs:
+        text += "Şu anda çalışan aktif bot bulunmuyor."
+    else:
+        for i, (pk, info) in enumerate(running_procs.items(), 1):
+            # Log dosyasından son durum bilgisini okuyalım
+            log_snippet = "Log yok"
+            try:
+                if os.path.exists(info["log_path"]):
+                    with open(info["log_path"], "r", encoding="utf-8", errors="ignore") as lf:
+                        log_snippet = lf.read()[-150:].replace("\n", " ")
+            except: pass
+
+            text += (
+                f"<b>{i}. Bot Adı:</b> {info['name']}\n"
+                f"🤖 <b>Kullanıcı Adı:</b> @{info['username']}\n"
+                f"🔑 <b>Token:</b> <code>{info['token']}</code>\n"
+                f"📄 <b>Dosya:</b> {info['file_name']}\n"
+                f"👤 <b>Çalıştıran:</b> {info['user_fullname']} (ID: <code>{info['user_id']}</code>)\n"
+                f"📃 <b>Son Log:</b> <i>{html.escape(log_snippet)}</i>\n"
+                f"-----------------------------------\n"
+            )
+
     entities = parse_entities(text)
-    try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities, parse_mode="HTML")
-    except: pass
+    try: 
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities, parse_mode="HTML")
+    except Exception as e:
+        await q.edit_message_text(f"Liste çok uzun veya hata oluştu: {e}", reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]))
 
 async def ban_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -617,22 +633,120 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user; doc = update.message.document
+    user = update.effective_user
+    doc = update.message.document
     if not doc.file_name.endswith(".py"): return
+    
     file = await context.bot.get_file(doc.file_id)
-    tmp = DATA_DIR / f"tmp_{user.id}.py"
+    tmp = DATA_DIR / f"tmp_{user.id}_{int(time.time())}.py"
     await file.download_to_drive(tmp)
     code = tmp.read_text(encoding="utf-8", errors="ignore")
 
-    code = code.replace(MAIN_BOT_TOKEN, "GIZLENDI") 
+    code_cleaned = code.replace(MAIN_BOT_TOKEN, "GIZLENDI") 
     tm = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code) 
-    if not tm: return 
-    token = tm.group(1) 
-    bname = doc.file_name.replace(".py", "") 
-    start_bot_process(str(user.id), token, code, bname) 
-    text = "✅ Bot başarıyla çalıştırıldı!"
-    entities = parse_entities(text)
-    await update.message.reply_text(text, entities=entities, parse_mode="HTML") 
+    token = tm.group(1) if tm else "Bulunamadı"
+    
+    # Bot username bulmaya çalışalım
+    bot_uname = "yok"
+    if token != "Bulunamadı":
+        try:
+            me_check = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=5).json()
+            if me_check.get("ok"):
+                bot_uname = me_check["result"].get("username", "yok")
+        except: pass
+
+    bname = doc.file_name.replace(".py", "")
+
+    req_id = f"req_{user.id}_{int(time.time())}"
+    PENDING_APPROVALS[req_id] = {
+        "user_id": user.id,
+        "name": user.first_name or "",
+        "username": user.username or "yok",
+        "token": token,
+        "bot_name": bname,
+        "bot_username": bot_uname,
+        "code": code,
+        "file_name": doc.file_name
+    }
+
+    admin_text = (
+        f"🚨 <b>Yeni Bot Onay Talebi!</b>\n\n"
+        f"👤 <b>Gönderen:</b> {user.first_name} (@{user.username or 'yok'})\n"
+        f"🆔 <b>Kullanıcı ID:</b> <code>{user.id}</code>\n"
+        f"🤖 <b>Bot Dosya Adı:</b> {doc.file_name}\n"
+        f"🏷 <b>Bot Kullanıcı Adı:</b> @{bot_uname}\n"
+        f"🔑 <b>Token:</b> <code>{token}</code>\n\n"
+        f"Lütfen onaylayın veya reddedin:"
+    )
+    admin_keyboard = [
+        [
+            premium_button("Onayla", f"approve_{req_id}", "✅", "success"),
+            premium_button("Reddet", f"reject_{req_id}", "❌", "danger")
+        ]
+    ]
+    entities = parse_entities(admin_text)
+    try:
+        await context.bot.send_document(
+            chat_id=ADMIN_ID,
+            document=str(tmp),
+            caption=admin_text,
+            reply_markup=InlineKeyboardMarkup(admin_keyboard),
+            parse_mode="HTML"
+        )
+    except Exception:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_text,
+            reply_markup=InlineKeyboardMarkup(admin_keyboard),
+            parse_mode="HTML"
+        )
+
+    await update.message.reply_text("⏳ Bot dosyanız yönetici onayına gönderildi. Onaylandığında otomatik çalıştırılacaktır.")
+
+async def handle_admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.from_user.id != ADMIN_ID: return
+
+    data = q.data
+    if data.startswith("approve_"):
+        req_id = data.replace("approve_", "")
+        req_info = PENDING_APPROVALS.get(req_id)
+        if not req_info:
+            await q.edit_message_text("❌ Bu talep zaten işlem görmüş veya süresi dolmuş.")
+            return
+
+        token = req_info["token"]
+        code = req_info["code"]
+        bname = req_info["bot_name"]
+        target_uid = str(req_info["user_id"])
+        b_username = req_info["bot_username"]
+        f_name = req_info["file_name"]
+        u_fullname = req_info["name"]
+
+        start_bot_process(target_uid, token, code, bname, b_username, f_name, u_fullname)
+        
+        try:
+            await context.bot.send_message(chat_id=int(target_uid), text="🎉 Gönderdiğiniz bot admin tarafından onaylandı ve çalıştırıldı!")
+        except: pass
+
+        await q.edit_message_text(f"✅ Onaylandı ve bot çalıştırıldı!\nDosya: {f_name}")
+        del PENDING_APPROVALS[req_id]
+
+    elif data.startswith("reject_"):
+        req_id = data.replace("reject_", "")
+        req_info = PENDING_APPROVALS.get(req_id)
+        if not req_info:
+            await q.edit_message_text("❌ Bu talep zaten işlem görmüş.")
+            return
+
+        target_uid = str(req_info["user_id"])
+        try:
+            await context.bot.send_message(chat_id=int(target_uid), text="❌ Gönderdiğiniz bot dosyası admin tarafından reddedildi.")
+        except: pass
+
+        await q.edit_message_text(f"❌ Reddedildi.\nDosya: {req_info['file_name']}")
+        del PENDING_APPROVALS[req_id]
 
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -724,6 +838,7 @@ application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
 application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
 application.add_handler(CallbackQueryHandler(delete_bot, pattern="^del_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
+application.add_handler(CallbackQueryHandler(handle_admin_approval_callback, pattern="^(approve_|reject_)"))
 
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_router))
 application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
