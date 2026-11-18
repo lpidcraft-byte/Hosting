@@ -143,8 +143,7 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
     kw = {"text": text}
     if url: kw["url"] = url
     else: kw["callback_data"] = callback_data
-    if emoji in EMOJI_IDS: kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
-    # style parametresi telegram-bot kütüphanesinde hata yaptığından güvenle hariç tutuluyor
+    # telegram-bot kütüphanesinde desteklenmeyen stil ve emoji argümanları temizleniyor
     return InlineKeyboardButton(**kw)
 
 def parse_entities(text: str):
