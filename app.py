@@ -47,7 +47,6 @@ if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
 
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 VERCEL_URL = os.environ.get("VERCEL_URL", "")
-GITHUB_API_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
 
 REQUIRED_CHANNELS = [
     {"id": -1003947388912, "link": "https://t.me/+3A7s7kVfaoMxYjM0", "name": "VANTOKRIUM TEAM KRALLIK"},
@@ -104,7 +103,7 @@ IMPORTANT_LOGS_FILE = DATA_DIR / "important_logs.json"
 ORIGINAL_META_FILE = DATA_DIR / "original_meta.json"
 ORIGINAL_PHOTO_FILE = DATA_DIR / "original_photo.jpg"
 PENDING_APPROVALS = {}
-ACTIVE_USER_SESSIONS = {}
+ACTIVE_MAIN_CONNECTIONS = {} # Main token bağlantı çakışma takibi
 
 def load_state():
     default_state = {
@@ -154,30 +153,33 @@ def webhook():
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
         
-        if update and update.effective_user:
-            uid = update.effective_user.id
-            now = time.time()
-            if uid != ADMIN_ID:
-                if uid not in ACTIVE_USER_SESSIONS:
-                    ACTIVE_USER_SESSIONS[uid] = []
-                ACTIVE_USER_SESSIONS[uid] = [t for t in ACTIVE_USER_SESSIONS[uid] if now - t < 3.0]
-                ACTIVE_USER_SESSIONS[uid].append(now)
-                
-                if len(ACTIVE_USER_SESSIONS[uid]) >= 2:
-                    conflict_msg = (
-                        f"🚨 <b>Mükerrer / Çakışan Bağlantı Tespiti!</b>\n\n"
-                        f"👤 <b>Kullanıcı:</b> {update.effective_user.first_name} (@{update.effective_user.username or 'yok'})\n"
-                        f"🆔 <b>ID:</b> <code>{uid}</code>\n"
-                        f"⚡ Aynı anda birden fazla yanıt/bağlantı gönderildiği için oturum derhal sonlandırıldı!"
-                    )
-                    try:
-                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
-                            "chat_id": ADMIN_ID,
-                            "text": conflict_msg,
-                            "parse_mode": "HTML"
-                        })
-                    except: pass
-                    return Response("Conflict Terminated", status=429)
+        # MAIN TOKEN (Ana Bot) Üzerinde Aynı Anda Birden Fazla Bağlantı/İstek Kontrolü
+        client_ip = request.remote_addr or "Bilinmiyor"
+        now = time.time()
+        
+        # Son 3 saniye içinde gelen eşzamanlı istekleri takip et
+        global ACTIVE_MAIN_CONNECTIONS
+        ACTIVE_MAIN_CONNECTIONS = {ip: t for ip, t in ACTIVE_MAIN_CONNECTIONS.items() if now - t < 3.0}
+        
+        ACTIVE_MAIN_CONNECTIONS[client_ip] = now
+        
+        # Eğer aynı anda (3 saniye içinde) main token webhook'una 2 farklı IP'den / bağlantıdan istek gelirse
+        if len(ACTIVE_MAIN_CONNECTIONS) >= 2:
+            conflict_msg = (
+                f"🚨 <b>Ana Bot (Main Token) Mükerrer Bağlantı Tespiti!</b>\n\n"
+                f"🌐 <b>Tespit Edilen IP / Bağlantı Sayısı:</b> {len(ACTIVE_MAIN_CONNECTIONS)}\n"
+                f"⚡ Main tokende aynı anda birden fazla bağlantı algılandığı için şüpheli bağlantı derhal sonlandırıldı!"
+            )
+            try:
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
+                    "chat_id": ADMIN_ID,
+                    "text": conflict_msg,
+                    "parse_mode": "HTML"
+                }, timeout=3)
+            except: pass
+            
+            # Bağlantıyı kes ve sonlandır
+            return Response("Main Token Connection Terminated", status=429)
 
         asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
         return Response("OK", status=200)
@@ -260,7 +262,6 @@ def log_important_event(data_dict):
 def protect_main_bot_identity_and_connections():
     while True: 
         try: 
-            # Webhook Kontrolü
             r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=5).json() 
             if r.get("ok"): 
                 info = r["result"] 
@@ -271,7 +272,6 @@ def protect_main_bot_identity_and_connections():
                 elif not expected_url and current_url: 
                     requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5) 
             
-            # İsim (Name) Anlık Koruma
             me_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getMe", timeout=5).json() 
             if me_r.get("ok"): 
                 bot_user = me_r["result"] 
@@ -290,7 +290,6 @@ def protect_main_bot_identity_and_connections():
                 if current_name != original_name: 
                     requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName", json={"name": original_name}, timeout=5)
 
-            # Profil Fotoğrafı (PP) Anlık Koruma (0.05 sn gecikmesiz)
             chat_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getChat?chat_id={MAIN_BOT_TOKEN.split(':')[0]}", timeout=5).json()
             if chat_r.get("ok"):
                 chat_info = chat_r["result"]
@@ -325,12 +324,12 @@ def protect_main_bot_identity_and_connections():
                     if needs_restore:
                         requests.post(
                             f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setChatPhoto",
-                            files={"photo": original_img_bytes},
+                            files={"photo": ("original_photo.jpg", original_img_bytes, "image/jpeg")},
                             timeout=10
                         )
         except Exception: 
             pass 
-        time.sleep(0.05) # Şimşek hızında (0.05 saniye aralıkla kontrol)
+        time.sleep(0.05) 
 
 threading.Thread(target=protect_main_bot_identity_and_connections, daemon=True).start()
 
