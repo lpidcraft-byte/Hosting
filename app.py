@@ -25,7 +25,7 @@ def ensure_dependencies():
             __import__(module_name)
         except ImportError:
             try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-q", pkg_name], check=True)
+                subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", -q, pkg_name], check=True)
             except Exception:
                 pass
 
@@ -143,8 +143,11 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
     kw = {"text": text}
     if url: kw["url"] = url
     else: kw["callback_data"] = callback_data
-    # telegram-bot kütüphanesinde desteklenmeyen stil ve emoji argümanları temizleniyor
-    return InlineKeyboardButton(**kw)
+    if emoji in EMOJI_IDS: 
+        kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
+    
+    # python-telegram-bot sürüm uyumsuzluğunu aşmak için buton sözlüğünü doğrudan döndürüyoruz
+    return InlineKeyboardButton.de_json(kw, application.bot)
 
 def parse_entities(text: str):
     entities = []
