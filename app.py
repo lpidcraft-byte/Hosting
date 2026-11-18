@@ -41,7 +41,6 @@ MAIN_BOT_TOKEN = "9083299742:AAGFQ3OAzLSe9LF3cZb3tyoptTfQt0MtgQU"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", MAIN_BOT_TOKEN)
 ADMIN_ID = 8913966694
 
-# Railway, Render ve Vercel URL algılama
 RAILWAY_URL = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""))
 if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
     RAILWAY_URL = f"https://{RAILWAY_URL}"
@@ -145,7 +144,7 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
     if url: kw["url"] = url
     else: kw["callback_data"] = callback_data
     if emoji in EMOJI_IDS: kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
-    if style: kw["style"] = style
+    # style parametresi telegram-bot kütüphanesinde hata yaptığından güvenle hariç tutuluyor
     return InlineKeyboardButton(**kw)
 
 def parse_entities(text: str):
