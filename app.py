@@ -40,6 +40,12 @@ from telegram.ext import (
 MAIN_BOT_TOKEN = "9083299742:AAGFQ3OAzLSe9LF3cZb3tyoptTfQt0MtgQU"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", MAIN_BOT_TOKEN)
 ADMIN_ID = 8913966694
+
+# Railway, Render ve Vercel URL algılama
+RAILWAY_URL = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""))
+if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
+    RAILWAY_URL = f"https://{RAILWAY_URL}"
+
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 VERCEL_URL = os.environ.get("VERCEL_URL", "")
 GITHUB_API_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
@@ -80,7 +86,7 @@ class SensitiveFilter(logging.Filter):
         msg = re.sub(r'\b(\d{6,12}):[A-Za-z0-9_-]{30,50}\b', r'\1:GIZLENDI', msg)
         msg = re.sub(r'github_pat_[A-Za-z0-9_]{50,}', 'GIZLENDI', msg)
         record.msg = msg
-        record.args = () 
+        record.args = ()
         return True
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -91,7 +97,7 @@ if os.path.exists("/data") and os.access("/data", os.W_OK):
     DATA_DIR = Path("/data")
 else:
     DATA_DIR = Path("/tmp/data")
-    
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 MESSAGE_LOGS_FILE = DATA_DIR / "message_logs.json"
@@ -180,67 +186,54 @@ def log_user_message(user, text):
         if MESSAGE_LOGS_FILE.exists():
             with open(MESSAGE_LOGS_FILE, "r", encoding="utf-8") as f:
                 logs = json.load(f)
-        
-        safe_text = mask_token_in_text(text)
-        log_entry = {
-            "time": time.strftime("%d.%m.%Y %H:%M:%S", time.localtime()),
-            "id": user.id,
-            "name": user.first_name or "",
-            "username": user.username or "yok",
-            "text": safe_text
-        }
-        logs.append(log_entry)
-        if len(logs) > 500: logs = logs[-500:]
-        
-        with open(MESSAGE_LOGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(logs, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        safe_text = mask_token_in_text(text) 
+        log_entry = { 
+            "time": time.strftime("%d.%m.%Y %H:%M:%S", time.localtime()), 
+            "id": user.id, 
+            "name": user.first_name or "", 
+            "username": user.username or "yok", 
+            "text": safe_text 
+        } 
+        logs.append(log_entry) 
+        if len(logs) > 500: logs = logs[-500:] 
+        with open(MESSAGE_LOGS_FILE, "w", encoding="utf-8") as f: 
+            json.dump(logs, f, ensure_ascii=False, indent=2) 
+    except Exception: 
+        pass 
 
 def protect_main_bot_identity_and_connections():
     original_name = None
-    
-    while True:
-        try:
-            r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json()
-            if r.get("ok"):
-                info = r["result"]
-                expected_url = f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}" if RENDER_URL else (f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}" if VERCEL_URL else "")
-                current_url = info.get("url", "")
-                
-                if expected_url and current_url != expected_url:
-                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook?url={expected_url}", timeout=10)
-                elif not expected_url and current_url:
-                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
-
-            me_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getMe", timeout=10).json()
-            if me_r.get("ok"):
-                bot_user = me_r["result"]
-                current_name = bot_user.get("first_name", "")
-                
-                if ORIGINAL_META_FILE.exists():
-                    try:
-                        with open(ORIGINAL_META_FILE, "r", encoding="utf-8") as f:
-                            meta = json.load(f)
-                            original_name = meta.get("name", original_name)
-                    except: pass
-                
-                if not original_name:
-                    original_name = current_name
-                    with open(ORIGINAL_META_FILE, "w", encoding="utf-8") as f:
-                        json.dump({"name": original_name}, f, ensure_ascii=False)
-                
-                if current_name != original_name:
-                    requests.post(
-                        f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName",
-                        json={"name": original_name},
-                        timeout=10
-                    )
-
-        except Exception:
-            pass
-        
-        time.sleep(2)
+    while True: 
+        try: 
+            r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json() 
+            if r.get("ok"): 
+                info = r["result"] 
+                expected_url = f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}" if RAILWAY_URL else (f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}" if RENDER_URL else (f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}" if VERCEL_URL else "")) 
+                current_url = info.get("url", "") 
+                if expected_url and current_url != expected_url: 
+                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook?url={expected_url}", timeout=10) 
+                elif not expected_url and current_url: 
+                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10) 
+            
+            me_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getMe", timeout=10).json() 
+            if me_r.get("ok"): 
+                bot_user = me_r["result"] 
+                current_name = bot_user.get("first_name", "") 
+                if ORIGINAL_META_FILE.exists(): 
+                    try: 
+                        with open(ORIGINAL_META_FILE, "r", encoding="utf-8") as f: 
+                            meta = json.load(f) 
+                            original_name = meta.get("name", original_name) 
+                    except: pass 
+                if not original_name: 
+                    original_name = current_name 
+                    with open(ORIGINAL_META_FILE, "w", encoding="utf-8") as f: 
+                        json.dump({"name": original_name}, f, ensure_ascii=False) 
+                if current_name != original_name: 
+                    requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName", json={"name": original_name}, timeout=10) 
+        except Exception: 
+            pass 
+        time.sleep(2) 
 
 threading.Thread(target=protect_main_bot_identity_and_connections, daemon=True).start()
 
@@ -259,14 +252,14 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ch in REQUIRED_CHANNELS:
         keyboard.append([premium_button(f"Katıl: {ch['name']}", emoji="📢", style="primary", url=ch["link"])])
     keyboard.append([premium_button("Kontrol Et", "check_join", "✅", "success")])
-    
-    text = "Zorunlu Kanal Üyeliği\n\nLütfen kanallara katılın ve kontrol et butonuna basın."
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-        except: pass
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    text = "Zorunlu Kanal Üyeliği\n\nLütfen kanallara katılın ve kontrol et butonuna basın." 
+    reply_markup = InlineKeyboardMarkup(keyboard) 
+    if update.callback_query: 
+        try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML") 
+        except: pass 
+    else: 
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML") 
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -281,35 +274,34 @@ def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", build_cm
     proc_key = f"{uid}_{int(time.time())}"
     bot_dir = DATA_DIR / "user_bots" / uid / proc_key
     bot_dir.mkdir(parents=True, exist_ok=True)
-    script_path = bot_dir / f"bot_{proc_key}.py"
+    script_path = bot_dir / f"bot{proc_key}.py"
     log_path = bot_dir / f"log_{proc_key}.txt"
-    
-    code_content = code_content.replace(MAIN_BOT_TOKEN, "9000000000:AABBBCCDDEEFFGGHHIIJJKKLMMNNOOPPQQRR")
-    
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(code_content)
 
-    with open(log_path, "w", encoding="utf-8") as lf:
-        if build_cmd.strip():
-            try:
-                subprocess.run(build_cmd, shell=True, cwd=str(bot_dir), capture_output=True, text=True, timeout=300)
-            except Exception:
-                pass
-    
-    log_file = open(log_path, "a", encoding="utf-8")
-    env = {**os.environ, "BOT_TOKEN": bot_token}
-    
-    if start_cmd.strip():
-        proc = subprocess.Popen(start_cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
-    else:
-        proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env)
-    
-    running_procs[proc_key] = {
-        "proc": proc, "log_path": str(log_path), "token": "GİZLİ",
-        "started": time.time(), "user_id": uid, "name": bot_name,
-        "build_cmd": build_cmd, "start_cmd": start_cmd, "script_path": str(script_path)
-    }
-    return proc_key
+    code_content = code_content.replace(MAIN_BOT_TOKEN, "9000000000:AABBBCCDDEEFFGGHHIIJJKKLMMNNOOPPQQRR") 
+    with open(script_path, "w", encoding="utf-8") as f: 
+        f.write(code_content) 
+    with open(log_path, "w", encoding="utf-8") as lf: 
+        if build_cmd.strip(): 
+            try: subprocess.run(build_cmd, shell=True, cwd=str(bot_dir), capture_output=True, text=True, timeout=300) 
+            except Exception: pass 
+    log_file = open(log_path, "a", encoding="utf-8") 
+    env = {**os.environ, "BOT_TOKEN": bot_token} 
+    if start_cmd.strip(): 
+        proc = subprocess.Popen(start_cmd, shell=True, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env) 
+    else: 
+        proc = subprocess.Popen([sys.executable, str(script_path)], stdout=log_file, stderr=subprocess.STDOUT, cwd=str(bot_dir), env=env) 
+    running_procs[proc_key] = { 
+        "proc": proc, 
+        "log_path": str(log_path), 
+        "token": "GİZLİ", 
+        "started": time.time(), 
+        "user_id": uid, 
+        "name": bot_name, 
+        "build_cmd": build_cmd, 
+        "start_cmd": start_cmd, 
+        "script_path": str(script_path) 
+    } 
+    return proc_key 
 
 def stop_bot_process(proc_key):
     if proc_key in running_procs:
@@ -332,30 +324,26 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await update.callback_query.edit_message_text(text, entities=entities, parse_mode="HTML")
             except: pass
         return
+
+    uid = str(user.id) 
+    global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""} 
+    save_state() 
+    keyboard = [] 
+    if user.id == ADMIN_ID: 
+        keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")]) 
+    keyboard.append([premium_button("GitHub ile Başlat", "github_start", "🌐", "success")]) 
+    keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")]) 
+    keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")]) 
+    keyboard.append([premium_button("Pip Yükleyici", "pip_menu", "📦", "primary")]) 
     
-    if update.message:
-        uid = str(user.id)
-        global_state["users"][uid] = {"username": user.username or "", "first_name": user.first_name or ""}
-        save_state()
-    
-    keyboard = []
-    if user.id == ADMIN_ID:
-        keyboard.append([premium_button("Admin Paneli", "admin_panel", "👮‍♀", "primary")])
-    keyboard.append([premium_button("GitHub ile Başlat", "github_start", "🌐", "success")])
-    keyboard.append([premium_button("Botlarım", "my_bots", "🤖", "success")])
-    keyboard.append([premium_button("Premium Al", "buy_premium", "💎", "primary")])
-    keyboard.append([premium_button("Pip Yükleyici", "pip_menu", "📦", "primary")])
-    
-    text = f"Merhaba {user.first_name}, dosyanızı göndererek botunuzu çalıştırabilirsiniz."
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    entities = parse_entities(text)
-    
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup, entities=entities, parse_mode="HTML")
-    elif update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, entities=entities, parse_mode="HTML")
-        except: pass
+    text = f"Merhaba {user.first_name}, dosyanızı göndererek botunuzu çalıştırabilirsiniz." 
+    reply_markup = InlineKeyboardMarkup(keyboard) 
+    entities = parse_entities(text) 
+    if update.message: 
+        await update.message.reply_text(text, reply_markup=reply_markup, entities=entities, parse_mode="HTML") 
+    elif update.callback_query: 
+        try: await update.callback_query.edit_message_text(text, reply_markup=reply_markup, entities=entities, parse_mode="HTML") 
+        except: pass 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -370,19 +358,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
-    
-    text = "Admin Paneli"
-    keyboard = [
-        [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary"), premium_button("Mesaj Logları", "message_logs", "💬", "success")],
-        [premium_button("Ban At", "ban_user", "🚫", "danger"), premium_button("Ban Kaldır", "unban_user", "✅", "success")],
-        [premium_button("Duyuru", "broadcast", "📢", "primary")],
-        [premium_button("Premium Ver", "give_premium", "💎", "success"), premium_button("Premium Al", "revoke_premium", "❌", "danger")],
-        [premium_button("Çalışan Botlar", "file_list", "📁", "primary")],
-        [premium_button("Geri", "back_start", "↩", "danger")]
-    ]
-    entities = parse_entities(text)
-    try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities, parse_mode="HTML")
-    except: pass
+
+    text = "Admin Paneli" 
+    keyboard = [ 
+        [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary"), premium_button("Mesaj Logları", "message_logs", "💬", "success")], 
+        [premium_button("Ban At", "ban_user", "🚫", "danger"), premium_button("Ban Kaldır", "unban_user", "✅", "success")], 
+        [premium_button("Duyuru", "broadcast", "📢", "primary")], 
+        [premium_button("Premium Ver", "give_premium", "💎", "success"), premium_button("Premium Al", "revoke_premium", "❌", "danger")], 
+        [premium_button("Çalışan Botlar", "file_list", "📁", "primary")], 
+        [premium_button("Geri", "back_start", "↩", "danger")] 
+    ] 
+    entities = parse_entities(text) 
+    try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities, parse_mode="HTML") 
+    except: pass 
 
 async def message_logs_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -394,11 +382,11 @@ async def message_logs_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             with open(MESSAGE_LOGS_FILE, "r", encoding="utf-8") as f:
                 logs = json.load(f)
-            if not logs:
-                text += "Kayıt bulunamadı."
-            else:
-                for l in logs[-25:]:
-                    text += f"{l['time']} - {l['name']} (@{l['username']}) [{l['id']}]: {html.escape(l['text'])}\n"
+                if not logs:
+                    text += "Kayıt bulunamadı."
+                else:
+                    for l in logs[-25:]:
+                        text += f"{l['time']} - {l['name']} (@{l['username']}) [{l['id']}]: {html.escape(l['text'])}\n"
         except Exception:
             text += "Okunamadı."
     entities = parse_entities(text)
@@ -515,7 +503,7 @@ async def delete_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pk = q.data.replace("del_", "")
     if pk in running_procs:
         stop_bot_process(pk)
-        await q.edit_message_text("Bot silindi.", reply_markup=InlineKeyboardMarkup([[premium_button("Botlara Dön", "my_bots", "↩", "primary")]]))
+    await q.edit_message_text("Bot silindi.", reply_markup=InlineKeyboardMarkup([[premium_button("Botlara Dön", "my_bots", "↩", "primary")]]))
 
 async def github_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -531,41 +519,41 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     text = (update.message.text or "").strip()
     if user: log_user_message(user, text)
-    
-    ud = context.user_data
-    if ud.get("awaiting_ban_id"):
-        ud["awaiting_ban_id"] = False
-        global_state["banned"].append(text)
-        save_state()
-        await update.message.reply_text("Banlandı.")
-        return
-    if ud.get("awaiting_unban_id"):
-        ud["awaiting_unban_id"] = False
-        if text in global_state["banned"]:
-            global_state["banned"].remove(text)
-            save_state()
-        await update.message.reply_text("Ban kaldırıldı.")
-        return
-    if ud.get("awaiting_broadcast"):
-        await do_broadcast(update, context)
-        return
-    if ud.get("awaiting_premium_id"):
-        ud["awaiting_premium_id"] = False
-        await premium_duration_menu(update, context, text)
-        return
-    if ud.get("awaiting_revoke_id"):
-        ud["awaiting_revoke_id"] = False
-        global_state["premium"].pop(text, None)
-        save_state()
-        await update.message.reply_text("Premium alındı.")
-        return
-    if ud.get("awaiting_github_url"):
-        await handle_github_url(update, context)
-        return
-    if ud.get("awaiting_pip_package"):
-        ud["awaiting_pip_package"] = False
-        threading.Thread(target=install_pip_background, args=(text, update.effective_chat.id, context)).start()
-        return
+
+    ud = context.user_data 
+    if ud.get("awaiting_ban_id"): 
+        ud["awaiting_ban_id"] = False 
+        global_state["banned"].append(text) 
+        save_state() 
+        await update.message.reply_text("Banlandı.") 
+        return 
+    if ud.get("awaiting_unban_id"): 
+        ud["awaiting_unban_id"] = False 
+        if text in global_state["banned"]: 
+            global_state["banned"].remove(text) 
+            save_state() 
+        await update.message.reply_text("Ban kaldırıldı.") 
+        return 
+    if ud.get("awaiting_broadcast"): 
+        await do_broadcast(update, context) 
+        return 
+    if ud.get("awaiting_premium_id"): 
+        ud["awaiting_premium_id"] = False 
+        await premium_duration_menu(update, context, text) 
+        return 
+    if ud.get("awaiting_revoke_id"): 
+        ud["awaiting_revoke_id"] = False 
+        global_state["premium"].pop(text, None) 
+        save_state() 
+        await update.message.reply_text("Premium alındı.") 
+        return 
+    if ud.get("awaiting_github_url"): 
+        await handle_github_url(update, context) 
+        return 
+    if ud.get("awaiting_pip_package"): 
+        ud["awaiting_pip_package"] = False 
+        threading.Thread(target=install_pip_background, args=(text, update.effective_chat.id, context)).start() 
+        return 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user; doc = update.message.document
@@ -574,15 +562,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmp = DATA_DIR / f"tmp_{user.id}.py"
     await file.download_to_drive(tmp)
     code = tmp.read_text(encoding="utf-8", errors="ignore")
-    
-    code = code.replace(MAIN_BOT_TOKEN, "GIZLENDI")
-    tm = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code)
-    if not tm: return
-    token = tm.group(1)
-    
-    bname = doc.file_name.replace(".py", "")
-    start_bot_process(str(user.id), token, code, bname)
-    await update.message.reply_text("Bot başlatıldı.")
+
+    code = code.replace(MAIN_BOT_TOKEN, "GIZLENDI") 
+    tm = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code) 
+    if not tm: return 
+    token = tm.group(1) 
+    bname = doc.file_name.replace(".py", "") 
+    start_bot_process(str(user.id), token, code, bname) 
+    await update.message.reply_text("Bot başlatıldı.") 
 
 async def buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -599,7 +586,8 @@ async def handle_premium_purchase(update: Update, context: ContextTypes.DEFAULT_
     stars = 15 if days == 7 else (40 if days == 30 else 100)
     await context.bot.send_invoice(chat_id=q.from_user.id, title="Premium", description="Premium üyelik", payload=f"premium_{uid}_{days}", provider_token="", currency="XTR", prices=[{"label": "Premium", "amount": stars}])
 
-async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.answer()
+async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE): 
+    await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message; parts = msg.successful_payment.invoice_payload.split("_")
@@ -644,12 +632,12 @@ async def give_prem_365(u, c): await execute_give_premium(u, c, 365)
 
 application.add_handler(CallbackQueryHandler(give_prem_7, pattern="^give_prem_7$"))
 application.add_handler(CallbackQueryHandler(give_prem_30, pattern="^give_prem_30$"))
-application.add_handler(CallbackQueryHandler(CallbackQueryHandler, pattern="^give_prem_365$"))
+application.add_handler(CallbackQueryHandler(give_prem_365, pattern="^give_prem_365$"))
 
 application.add_handler(CallbackQueryHandler(github_start, pattern="^github_start$"))
 application.add_handler(CallbackQueryHandler(log_view, pattern="^log_"))
 application.add_handler(CallbackQueryHandler(stop_bot, pattern="^stop_"))
-application.add_handler(CallbackQueryHandler(delete_data := delete_bot, pattern="^del_"))
+application.add_handler(CallbackQueryHandler(delete_bot, pattern="^del_"))
 application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^back_start$"))
 
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_router))
@@ -666,13 +654,13 @@ def run_bot_async_loop(loop):
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
-    
-    if RENDER_URL:
-        try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={RENDER_URL}/webhook/{BOT_TOKEN}")
-        except: pass
-    elif VERCEL_URL:
-        try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url=https://{VERCEL_URL}/webhook/{BOT_TOKEN}")
-        except: pass
+
+    active_url = RAILWAY_URL or RENDER_URL or (f"https://{VERCEL_URL}" if VERCEL_URL else "")
+    if active_url: 
+        try: 
+            requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={active_url}/webhook/{BOT_TOKEN}") 
+        except: 
+            pass
 
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
