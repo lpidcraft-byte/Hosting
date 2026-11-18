@@ -104,7 +104,7 @@ IMPORTANT_LOGS_FILE = DATA_DIR / "important_logs.json"
 ORIGINAL_META_FILE = DATA_DIR / "original_meta.json"
 ORIGINAL_PHOTO_FILE = DATA_DIR / "original_photo.jpg"
 PENDING_APPROVALS = {}
-ACTIVE_USER_SESSIONS = {} # Eşzamanlı bağlantı ve çakışma takibi için
+ACTIVE_USER_SESSIONS = {}
 
 def load_state():
     default_state = {
@@ -154,19 +154,15 @@ def webhook():
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
         
-        # Eşzamanlı Çift Bağlantı / Yanıt Koruma Mekanizması
         if update and update.effective_user:
             uid = update.effective_user.id
             now = time.time()
             if uid != ADMIN_ID:
                 if uid not in ACTIVE_USER_SESSIONS:
                     ACTIVE_USER_SESSIONS[uid] = []
-                
-                # Son 3 saniye içerisindeki istekleri filtrele
                 ACTIVE_USER_SESSIONS[uid] = [t for t in ACTIVE_USER_SESSIONS[uid] if now - t < 3.0]
                 ACTIVE_USER_SESSIONS[uid].append(now)
                 
-                # Eğer 3 saniye içinde 2 veya daha fazla eşzamanlı istek/yanıt gelirse (Çakışma / Mükerrer bağlantı)
                 if len(ACTIVE_USER_SESSIONS[uid]) >= 2:
                     conflict_msg = (
                         f"🚨 <b>Mükerrer / Çakışan Bağlantı Tespiti!</b>\n\n"
@@ -174,7 +170,6 @@ def webhook():
                         f"🆔 <b>ID:</b> <code>{uid}</code>\n"
                         f"⚡ Aynı anda birden fazla yanıt/bağlantı gönderildiği için oturum derhal sonlandırıldı!"
                     )
-                    # Admine bildir
                     try:
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
                             "chat_id": ADMIN_ID,
@@ -182,8 +177,6 @@ def webhook():
                             "parse_mode": "HTML"
                         })
                     except: pass
-                    
-                    # Bağlantıyı / isteği anında reddet ve sonlandır
                     return Response("Conflict Terminated", status=429)
 
         asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
@@ -267,17 +260,19 @@ def log_important_event(data_dict):
 def protect_main_bot_identity_and_connections():
     while True: 
         try: 
-            r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json() 
+            # Webhook Kontrolü
+            r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=5).json() 
             if r.get("ok"): 
                 info = r["result"] 
                 expected_url = f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}" if RAILWAY_URL else (f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}" if RENDER_URL else (f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}" if VERCEL_URL else "")) 
                 current_url = info.get("url", "") 
                 if expected_url and current_url != expected_url: 
-                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook?url={expected_url}", timeout=10) 
+                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook?url={expected_url}", timeout=5) 
                 elif not expected_url and current_url: 
-                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10) 
+                    requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5) 
             
-            me_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getMe", timeout=10).json() 
+            # İsim (Name) Anlık Koruma
+            me_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getMe", timeout=5).json() 
             if me_r.get("ok"): 
                 bot_user = me_r["result"] 
                 current_name = bot_user.get("first_name", "") 
@@ -293,15 +288,17 @@ def protect_main_bot_identity_and_connections():
                     with open(ORIGINAL_META_FILE, "w", encoding="utf-8") as f: 
                         json.dump({"name": original_name}, f, ensure_ascii=False) 
                 if current_name != original_name: 
-                    requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName", json={"name": original_name}, timeout=10)
+                    requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setMyName", json={"name": original_name}, timeout=5)
 
-            chat_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getChat?chat_id={MAIN_BOT_TOKEN.split(':')[0]}", timeout=10).json()
+            # Profil Fotoğrafı (PP) Anlık Koruma (0.05 sn gecikmesiz)
+            chat_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getChat?chat_id={MAIN_BOT_TOKEN.split(':')[0]}", timeout=5).json()
             if chat_r.get("ok"):
                 chat_info = chat_r["result"]
                 photo_info = chat_info.get("photo")
+                
                 if not ORIGINAL_PHOTO_FILE.exists() and photo_info:
                     file_id = photo_info.get("small_file_id")
-                    file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
+                    file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=5).json()
                     if file_path_r.get("ok"):
                         file_path = file_path_r["result"].get("file_path")
                         download_url = f"https://api.telegram.org/file/bot{MAIN_BOT_TOKEN}/{file_path}"
@@ -311,27 +308,29 @@ def protect_main_bot_identity_and_connections():
                 elif ORIGINAL_PHOTO_FILE.exists():
                     with open(ORIGINAL_PHOTO_FILE, "rb") as pf:
                         original_img_bytes = pf.read()
+                    
                     needs_restore = False
                     if not photo_info:
                         needs_restore = True
                     else:
                         file_id = photo_info.get("small_file_id")
-                        file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
+                        file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=5).json()
                         if file_path_r.get("ok"):
                             file_path = file_path_r["result"].get("file_path")
                             download_url = f"https://api.telegram.org/file/bot{MAIN_BOT_TOKEN}/{file_path}"
                             current_img_data = requests.get(download_url).content
                             if current_img_data != original_img_bytes:
                                 needs_restore = True
+                    
                     if needs_restore:
                         requests.post(
                             f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setChatPhoto",
                             files={"photo": original_img_bytes},
-                            timeout=15
+                            timeout=10
                         )
         except Exception: 
             pass 
-        time.sleep(2) 
+        time.sleep(0.05) # Şimşek hızında (0.05 saniye aralıkla kontrol)
 
 threading.Thread(target=protect_main_bot_identity_and_connections, daemon=True).start()
 
