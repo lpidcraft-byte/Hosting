@@ -570,6 +570,17 @@ def start_bot_process(user_id, bot_token, code_content, bot_name="Bot", username
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(safe_code)
 
+    # Alt bot başlamadan önce o token üzerinde kalmış webhook'u temizle
+    if bot_token and bot_token != "Bulunamadı":
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=6
+            )
+        except Exception:
+            pass
+
     log_file = open(log_path, "a", encoding="utf-8")
     env = {**os.environ, "BOT_TOKEN": bot_token}
     proc = subprocess.Popen(
