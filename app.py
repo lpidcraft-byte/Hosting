@@ -40,11 +40,15 @@ MAIN_BOT_TOKEN = "9083299742:AAGFQ3OAzLSe9LF3cZb3tyoptTfQt0MtgQU"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", MAIN_BOT_TOKEN)
 ADMIN_ID = 8913966694
 
+# --- Railway URL Tespiti ---
 RAILWAY_URL = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""))
 if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
     RAILWAY_URL = f"https://{RAILWAY_URL}"
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 VERCEL_URL = os.environ.get("VERCEL_URL", "")
+
+# Eğer env boşsa sabit adresi yedek olarak kullan (Railway adresin)
+FALLBACK_URL = "https://hosting-production-a01232b6.up.railway.app"
 
 REQUIRED_CHANNELS = [
     {"id": -1003947388912, "link": "https://t.me/+3A7s7kVfaoMxYjM0", "name": "VANTOKRIUM TEAM KRALLIK"},
@@ -229,7 +233,6 @@ def scan_code(code):
     return findings, len(decoded) > 0
 
 def scan_forbidden_modules(code):
-    """Premium için yasaklı modülleri tarar. subprocess YOK."""
     warnings = []
     for pattern, reason in PREMIUM_FORBIDDEN_MODULES:
         try:
@@ -241,7 +244,6 @@ def scan_forbidden_modules(code):
     return warnings
 
 def extract_imports(code):
-    """Koddaki import modüllerini çıkarır."""
     imports = set()
     for m in re.finditer(r"^\s*import\s+([A-Za-z_][\w.]*(?:\s*,\s*[A-Za-z_][\w.]*)*)", code, re.MULTILINE):
         for part in m.group(1).split(","):
@@ -255,7 +257,6 @@ def extract_imports(code):
     return imports
 
 def auto_install_for_premium(code, user_id, chat_id, context):
-    """Premium üye için tüm import'ları otomatik pip ile yükler."""
     imports = extract_imports(code)
     to_install = []
     for mod in imports:
@@ -338,11 +339,101 @@ application = Application.builder().token(BOT_TOKEN).updater(None).build()
 bot_loop = asyncio.new_event_loop()
 flask_app = Flask(__name__)
 
+# ---------------------------------------------------------------------------
+# WEBHOOK YÖNETİMİ (SİLİCİ + KURUCU)
+# ---------------------------------------------------------------------------
 def get_webhook_url():
-    if RAILWAY_URL: return f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}"
-    if RENDER_URL: return f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}"
-    if VERCEL_URL: return f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}"
-    return ""
+    """Öncelik sırası: RAILWAY_URL -> RENDER_URL -> VERCEL_URL -> FALLBACK_URL"""
+    if RAILWAY_URL:
+        return f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}"
+    if RENDER_URL:
+        return f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}"
+    if VERCEL_URL:
+        return f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}"
+    # Hiçbiri yoksa fallback (Railway adresi)
+    return f"{FALLBACK_URL}/webhook/{MAIN_BOT_TOKEN}"
+
+def force_delete_webhook():
+    """Telegram'daki mevcut webhook'u zorla siler."""
+    try:
+        url = f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook"
+        res = requests.post(url, json={"drop_pending_updates": False}, timeout=10).json()
+        logger.info(f"Webhook silindi: {res.get('description', 'ok')}")
+        return res.get("ok", False)
+    except Exception as e:
+        logger.error(f"Webhook silme hatası: {e}")
+        return False
+
+def setup_webhook():
+    """Yeni webhook kurar ve doğrular."""
+    target = get_webhook_url()
+    if not target:
+        logger.error("Webhook URL'si belirlenemedi!")
+        return False
+
+    # 1) Önce mevcut durumu kontrol et
+    try:
+        info = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json()
+        current_url = info.get("result", {}).get("url", "")
+        if current_url == target:
+            logger.info(f"Webhook zaten doğru: {target}")
+            return True
+        if current_url:
+            logger.info(f"Yanlış webhook bulundu ({current_url}), siliniyor...")
+            force_delete_webhook()
+    except Exception as e:
+        logger.error(f"Webhook bilgisi alınamadı: {e}")
+
+    # 2) Yeni webhook kur
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook",
+            json={
+                "url": target,
+                "drop_pending_updates": False,
+                "max_connections": 40,
+                "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
+            },
+            timeout=15
+        ).json()
+        if res.get("ok"):
+            logger.info(f"✅ Webhook başarıyla kuruldu: {target}")
+            return True
+        else:
+            logger.error(f"Webhook kurulum hatası: {res}")
+            return False
+    except Exception as e:
+        logger.error(f"Webhook kurulum isteği hatası: {e}")
+        return False
+
+def webhook_watchdog():
+    """Her 30 saniyede bir webhook'u kontrol eder, yanlışsa düzeltir."""
+    while True:
+        try:
+            target = get_webhook_url()
+            info = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json()
+            if info.get("ok"):
+                result = info.get("result", {})
+                current_url = result.get("url", "")
+                pending = result.get("pending_update_count", 0)
+                last_error = result.get("last_error_message", "")
+
+                if current_url != target:
+                    logger.warning(f"Webhook yanlış! Mevcut: '{current_url}', Hedef: '{target}' → Düzeltiliyor...")
+                    setup_webhook()
+                elif last_error:
+                    logger.warning(f"Webhook hatası: {last_error} → Yeniden kuruluyor...")
+                    setup_webhook()
+                elif pending > 0:
+                    logger.info(f"Bekleyen mesaj: {pending}")
+                else:
+                    logger.debug(f"Webhook OK: {target}")
+        except Exception as e:
+            logger.debug(f"Watchdog hatası: {e}")
+        time.sleep(30)
+
+# Watchdog'u hemen başlat (uygulama initialize olmadan önce de çalışır)
+threading.Thread(target=webhook_watchdog, daemon=True).start()
 
 @flask_app.route("/", methods=["GET"])
 def health():
@@ -447,19 +538,6 @@ def log_security(data):
     except Exception:
         pass
 
-def sync_webhook():
-    expected = get_webhook_url()
-    if not expected: return False
-    try:
-        info = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=6).json()
-        if info.get("ok") and info["result"].get("url") != expected:
-            res = requests.post(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook",
-                                json={"url": expected, "drop_pending_updates": False}, timeout=8).json()
-            return bool(res.get("ok"))
-        return True
-    except Exception:
-        return False
-
 def protect_bot():
     while True:
         try:
@@ -467,6 +545,10 @@ def protect_bot():
         except Exception:
             pass
         time.sleep(30)
+
+def sync_webhook():
+    # Artık setup_webhook() kullanıyoruz
+    return setup_webhook()
 
 threading.Thread(target=protect_bot, daemon=True).start()
 
@@ -1063,7 +1145,6 @@ async def handle_document(update, context):
     await file.download_to_drive(tmp)
     code = tmp.read_text(encoding="utf-8", errors="ignore")
 
-    # Zararlı tarama
     findings, _ = scan_code(code)
     if findings and user.id != ADMIN_ID:
         context.user_data.pop("pending_update_target_pk", None)
@@ -1080,7 +1161,6 @@ async def handle_document(update, context):
         await update.message.reply_text("🚫 <b>Güvenlik ihlali! Banlandınız.</b>", parse_mode="HTML")
         return
 
-    # Premium için yasaklı modül tarama (subprocess YOK)
     if user_prem and user.id != ADMIN_ID:
         forbidden = scan_forbidden_modules(code)
         if forbidden:
@@ -1111,7 +1191,6 @@ async def handle_document(update, context):
             except Exception: pass
             return
 
-    # Premium → otomatik pip
     if user_prem and user.id != ADMIN_ID:
         threading.Thread(target=auto_install_for_premium,
                          args=(code, user.id, update.effective_chat.id, context)).start()
@@ -1295,8 +1374,16 @@ application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
 if __name__ == "__main__":
+    # Botu başlat
     bot_thread = threading.Thread(target=run_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
-    sync_webhook()
+    
+    # Webhook'u zorla kur (başlangıçta hemen)
+    time.sleep(2)
+    logger.info("Başlangıç webhook kurulumu başlıyor...")
+    force_delete_webhook()
+    time.sleep(1)
+    setup_webhook()
+    
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
