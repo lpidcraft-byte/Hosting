@@ -343,18 +343,15 @@ flask_app = Flask(__name__)
 # WEBHOOK YÖNETİMİ (SİLİCİ + KURUCU)
 # ---------------------------------------------------------------------------
 def get_webhook_url():
-    """Öncelik sırası: RAILWAY_URL -> RENDER_URL -> VERCEL_URL -> FALLBACK_URL"""
     if RAILWAY_URL:
         return f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}"
     if RENDER_URL:
         return f"{RENDER_URL}/webhook/{MAIN_BOT_TOKEN}"
     if VERCEL_URL:
         return f"https://{VERCEL_URL}/webhook/{MAIN_BOT_TOKEN}"
-    # Hiçbiri yoksa fallback (Railway adresi)
     return f"{FALLBACK_URL}/webhook/{MAIN_BOT_TOKEN}"
 
 def force_delete_webhook():
-    """Telegram'daki mevcut webhook'u zorla siler."""
     try:
         url = f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook"
         res = requests.post(url, json={"drop_pending_updates": False}, timeout=10).json()
@@ -365,26 +362,19 @@ def force_delete_webhook():
         return False
 
 def setup_webhook():
-    """Yeni webhook kurar ve doğrular."""
     target = get_webhook_url()
     if not target:
-        logger.error("Webhook URL'si belirlenemedi!")
         return False
-
-    # 1) Önce mevcut durumu kontrol et
     try:
         info = requests.get(f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/getWebhookInfo", timeout=10).json()
         current_url = info.get("result", {}).get("url", "")
         if current_url == target:
-            logger.info(f"Webhook zaten doğru: {target}")
             return True
         if current_url:
-            logger.info(f"Yanlış webhook bulundu ({current_url}), siliniyor...")
             force_delete_webhook()
     except Exception as e:
         logger.error(f"Webhook bilgisi alınamadı: {e}")
 
-    # 2) Yeni webhook kur
     try:
         res = requests.post(
             f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/setWebhook",
@@ -407,7 +397,6 @@ def setup_webhook():
         return False
 
 def webhook_watchdog():
-    """Her 30 saniyede bir webhook'u kontrol eder, yanlışsa düzeltir."""
     while True:
         try:
             target = get_webhook_url()
@@ -419,20 +408,15 @@ def webhook_watchdog():
                 last_error = result.get("last_error_message", "")
 
                 if current_url != target:
-                    logger.warning(f"Webhook yanlış! Mevcut: '{current_url}', Hedef: '{target}' → Düzeltiliyor...")
                     setup_webhook()
-                elif last_error:
+                elif last_error and "429" not in last_error: 
+                    # 429 hatası bizim kodumuzdan kaynaklıydı, artık yok. Ama başka hata varsa düzelt.
                     logger.warning(f"Webhook hatası: {last_error} → Yeniden kuruluyor...")
                     setup_webhook()
-                elif pending > 0:
-                    logger.info(f"Bekleyen mesaj: {pending}")
-                else:
-                    logger.debug(f"Webhook OK: {target}")
         except Exception as e:
             logger.debug(f"Watchdog hatası: {e}")
-        time.sleep(30)
+        time.sleep(60) # 60 saniyeye çıkardık ki Telegram API'yi yormayalım
 
-# Watchdog'u hemen başlat (uygulama initialize olmadan önce de çalışır)
 threading.Thread(target=webhook_watchdog, daemon=True).start()
 
 @flask_app.route("/", methods=["GET"])
@@ -444,18 +428,14 @@ def webhook():
     try:
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
-        if update and update.effective_user:
-            uid = update.effective_user.id
-            now = time.time()
-            if uid != ADMIN_ID:
-                global ACTIVE_MAIN_CONNECTIONS
-                ACTIVE_MAIN_CONNECTIONS = {k: t for k, t in ACTIVE_MAIN_CONNECTIONS.items() if now - t < 3.0}
-                ACTIVE_MAIN_CONNECTIONS[uid] = now
-                if len(ACTIVE_MAIN_CONNECTIONS) >= 3:
-                    return Response("Terminated", status=429)
-        asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
+        
+        # 429 HATASI ÇÖZÜLDÜ: Artık istekleri engellemiyoruz, direkt kuyruğa atıyoruz.
+        if update:
+            asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
+            
         return Response("OK", status=200)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Webhook parse hatası: {e}")
         return Response("OK", status=200)
 
 def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
@@ -537,20 +517,6 @@ def log_security(data):
         SECURITY_LOG_FILE.write_text(json.dumps(logs[-300:], ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
-
-def protect_bot():
-    while True:
-        try:
-            sync_webhook()
-        except Exception:
-            pass
-        time.sleep(30)
-
-def sync_webhook():
-    # Artık setup_webhook() kullanıyoruz
-    return setup_webhook()
-
-threading.Thread(target=protect_bot, daemon=True).start()
 
 def health_check():
     while True:
@@ -1374,11 +1340,9 @@ application.add_handler(PreCheckoutQueryHandler(pre_checkout))
 application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
 if __name__ == "__main__":
-    # Botu başlat
     bot_thread = threading.Thread(target=run_async_loop, args=(bot_loop,), daemon=True)
     bot_thread.start()
     
-    # Webhook'u zorla kur (başlangıçta hemen)
     time.sleep(2)
     logger.info("Başlangıç webhook kurulumu başlıyor...")
     force_delete_webhook()
