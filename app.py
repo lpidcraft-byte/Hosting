@@ -17,8 +17,8 @@ from collections import defaultdict
 from flask import Flask, request, Response
 
 def ensure_dependencies():
-    # waitress eklendi (Flask'ı production modunda çalıştırmak için)
-    required = {"pip": "pip", "socks": "PySocks", "telegram": "python-telegram-bot",
+    # python-telegram-bot v21+ olarak güncellendi (renkli buton ve emoji desteği için)
+    required = {"pip": "pip", "socks": "PySocks", "telegram": "python-telegram-bot>=21.0",
                 "flask": "flask", "requests": "requests", "waitress": "waitress"}
     for mod, pkg in required.items():
         try:
@@ -371,7 +371,7 @@ def setup_webhook():
             json={
                 "url": target,
                 "drop_pending_updates": False,
-                "max_connections": 1, # TEK SEFERDE 1 BAĞLANTI (429 HATASINI ÇÖZER)
+                "max_connections": 1,
                 "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
             },
             timeout=15
@@ -391,14 +391,11 @@ def webhook_watchdog():
             if info.get("ok"):
                 result = info.get("result", {})
                 current_url = result.get("url", "")
-                last_error = result.get("last_error_message", "")
-
                 if current_url != target:
                     setup_webhook()
-                # Broken pipe veya 429 hatası olsa bile watchdog sadece bekler, Telegram'ı boğmaz.
         except Exception:
             pass
-        time.sleep(300) # 5 dakikaya çıkardık (Telegram ban yemesin diye)
+        time.sleep(300)
 
 threading.Thread(target=webhook_watchdog, daemon=True).start()
 
@@ -411,11 +408,8 @@ def webhook():
     try:
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
-        
-        # İstekleri engellemiyoruz, direkt kuyruğa atıyoruz
         if update:
             asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
-            
         return Response("OK", status=200)
     except Exception:
         return Response("OK", status=200)
@@ -424,12 +418,17 @@ def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
     kw = {"text": text}
     if url: kw["url"] = url
     else: kw["callback_data"] = callback_data
+    
+    # Telegram Bot API 7.0+ destekli renk ve emoji parametreleri
     if emoji and emoji in EMOJI_IDS:
         kw["icon_custom_emoji_id"] = str(EMOJI_IDS[emoji])
-    if style: kw["style"] = style
+    if style:
+        kw["style"] = style
+        
     try:
         return InlineKeyboardButton(**kw)
     except Exception:
+        # Eğer eski sürümse hata vermesin diye fallback
         return InlineKeyboardButton(text=text, callback_data=callback_data or "noop", url=url)
 
 def parse_entities(text):
@@ -1331,7 +1330,7 @@ if __name__ == "__main__":
     time.sleep(1)
     setup_webhook()
     
-    port = int(os.environ.get("PORT", 8080))
-    # Flask yerine Waitress kullanıyoruz (Broken Pipe hatasını çözer)
+    # Portu 8080 olarak sabitledik (Railway'de çalışan port)
+    port = 8080
     logger.info(f"Sunucu {port} portunda başlatılıyor...")
     serve(flask_app, host="0.0.0.0", port=port, threads=4)
