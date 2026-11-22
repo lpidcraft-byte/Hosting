@@ -17,8 +17,9 @@ from collections import defaultdict
 from flask import Flask, request, Response
 
 def ensure_dependencies():
+    # waitress eklendi (Flask'ı production modunda çalıştırmak için)
     required = {"pip": "pip", "socks": "PySocks", "telegram": "python-telegram-bot",
-                "flask": "flask", "requests": "requests"}
+                "flask": "flask", "requests": "requests", "waitress": "waitress"}
     for mod, pkg in required.items():
         try:
             __import__(mod)
@@ -30,6 +31,7 @@ def ensure_dependencies():
 
 ensure_dependencies()
 
+from waitress import serve
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -40,14 +42,12 @@ MAIN_BOT_TOKEN = "9083299742:AAGFQ3OAzLSe9LF3cZb3tyoptTfQt0MtgQU"
 BOT_TOKEN = os.environ.get("BOT_TOKEN", MAIN_BOT_TOKEN)
 ADMIN_ID = 8913966694
 
-# --- Railway URL Tespiti ---
 RAILWAY_URL = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", ""))
 if RAILWAY_URL and not RAILWAY_URL.startswith("http"):
     RAILWAY_URL = f"https://{RAILWAY_URL}"
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 VERCEL_URL = os.environ.get("VERCEL_URL", "")
 
-# Eğer env boşsa sabit adresi yedek olarak kullan (Railway adresin)
 FALLBACK_URL = "https://hosting-production-a01232b6.up.railway.app"
 
 REQUIRED_CHANNELS = [
@@ -111,17 +111,14 @@ ACTIVE_MAIN_CONNECTIONS = {}
 RATE_LIMIT = defaultdict(list)
 BOT_START_TIME = time.time()
 
-# --- Dosya limitleri ---
 MAX_FILE_SIZE = 10 * 1024 * 1024
 STANDARD_FILE_LIMIT = 2 * 1024 * 1024
 PREMIUM_FILE_LIMIT = 10 * 1024 * 1024
 
-# --- Bot limitleri ---
 STANDARD_BOT_LIMIT = 2
 PREMIUM_BOT_LIMIT = 10
 MAX_VIOLATIONS_BEFORE_BAN = 3
 
-# --- Otomatik pip yükleme listesi ---
 AUTO_PIP_MODULES = {
     "requests": "requests", "numpy": "numpy", "pandas": "pandas",
     "telegram": "python-telegram-bot", "flask": "flask", "aiohttp": "aiohttp",
@@ -150,7 +147,6 @@ AUTO_PIP_MODULES = {
     "plotly": "plotly", "streamlit": "streamlit", "gradio": "gradio",
 }
 
-# --- Zararlı desenler (subprocess YOK) ---
 MALICIOUS_PATTERNS = [
     (r"\bos\.environ\b", "Ortam değişkenlerine erişim"),
     (r"\bMAIN_BOT_TOKEN\b", "Ana bot token erişimi"),
@@ -166,7 +162,6 @@ MALICIOUS_PATTERNS = [
     (r"\b(?:eval|exec)\s*\(.*(?:environ|socket|open|base64)", "Dinamik tehlikeli kod"),
 ]
 
-# --- Premium için yasaklı modüller (subprocess YOK) ---
 PREMIUM_FORBIDDEN_MODULES = [
     (r"\bimport\s+ctypes\b", "ctypes"),
     (r"\bfrom\s+ctypes\b", "ctypes"),
@@ -339,9 +334,6 @@ application = Application.builder().token(BOT_TOKEN).updater(None).build()
 bot_loop = asyncio.new_event_loop()
 flask_app = Flask(__name__)
 
-# ---------------------------------------------------------------------------
-# WEBHOOK YÖNETİMİ (SİLİCİ + KURUCU)
-# ---------------------------------------------------------------------------
 def get_webhook_url():
     if RAILWAY_URL:
         return f"{RAILWAY_URL}/webhook/{MAIN_BOT_TOKEN}"
@@ -354,12 +346,9 @@ def get_webhook_url():
 def force_delete_webhook():
     try:
         url = f"https://api.telegram.org/bot{MAIN_BOT_TOKEN}/deleteWebhook"
-        res = requests.post(url, json={"drop_pending_updates": False}, timeout=10).json()
-        logger.info(f"Webhook silindi: {res.get('description', 'ok')}")
-        return res.get("ok", False)
-    except Exception as e:
-        logger.error(f"Webhook silme hatası: {e}")
-        return False
+        requests.post(url, json={"drop_pending_updates": False}, timeout=10)
+    except Exception:
+        pass
 
 def setup_webhook():
     target = get_webhook_url()
@@ -372,8 +361,9 @@ def setup_webhook():
             return True
         if current_url:
             force_delete_webhook()
-    except Exception as e:
-        logger.error(f"Webhook bilgisi alınamadı: {e}")
+            time.sleep(1)
+    except Exception:
+        pass
 
     try:
         res = requests.post(
@@ -381,7 +371,7 @@ def setup_webhook():
             json={
                 "url": target,
                 "drop_pending_updates": False,
-                "max_connections": 40,
+                "max_connections": 1, # TEK SEFERDE 1 BAĞLANTI (429 HATASINI ÇÖZER)
                 "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
             },
             timeout=15
@@ -389,12 +379,9 @@ def setup_webhook():
         if res.get("ok"):
             logger.info(f"✅ Webhook başarıyla kuruldu: {target}")
             return True
-        else:
-            logger.error(f"Webhook kurulum hatası: {res}")
-            return False
     except Exception as e:
-        logger.error(f"Webhook kurulum isteği hatası: {e}")
-        return False
+        logger.error(f"Webhook kurulum hatası: {e}")
+    return False
 
 def webhook_watchdog():
     while True:
@@ -404,18 +391,14 @@ def webhook_watchdog():
             if info.get("ok"):
                 result = info.get("result", {})
                 current_url = result.get("url", "")
-                pending = result.get("pending_update_count", 0)
                 last_error = result.get("last_error_message", "")
 
                 if current_url != target:
                     setup_webhook()
-                elif last_error and "429" not in last_error: 
-                    # 429 hatası bizim kodumuzdan kaynaklıydı, artık yok. Ama başka hata varsa düzelt.
-                    logger.warning(f"Webhook hatası: {last_error} → Yeniden kuruluyor...")
-                    setup_webhook()
-        except Exception as e:
-            logger.debug(f"Watchdog hatası: {e}")
-        time.sleep(60) # 60 saniyeye çıkardık ki Telegram API'yi yormayalım
+                # Broken pipe veya 429 hatası olsa bile watchdog sadece bekler, Telegram'ı boğmaz.
+        except Exception:
+            pass
+        time.sleep(300) # 5 dakikaya çıkardık (Telegram ban yemesin diye)
 
 threading.Thread(target=webhook_watchdog, daemon=True).start()
 
@@ -429,13 +412,12 @@ def webhook():
         req_json = request.get_json(force=True)
         update = Update.de_json(req_json, application.bot)
         
-        # 429 HATASI ÇÖZÜLDÜ: Artık istekleri engellemiyoruz, direkt kuyruğa atıyoruz.
+        # İstekleri engellemiyoruz, direkt kuyruğa atıyoruz
         if update:
             asyncio.run_coroutine_threadsafe(application.update_queue.put(update), bot_loop)
             
         return Response("OK", status=200)
-    except Exception as e:
-        logger.debug(f"Webhook parse hatası: {e}")
+    except Exception:
         return Response("OK", status=200)
 
 def premium_button(text, callback_data=None, emoji="✅", style=None, url=None):
@@ -1350,4 +1332,6 @@ if __name__ == "__main__":
     setup_webhook()
     
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    # Flask yerine Waitress kullanıyoruz (Broken Pipe hatasını çözer)
+    logger.info(f"Sunucu {port} portunda başlatılıyor...")
+    serve(flask_app, host="0.0.0.0", port=port, threads=4)
