@@ -1331,7 +1331,7 @@ if __name__ == "__main__":
     time.sleep(1)
     setup_webhook()
     
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     # Flask yerine Waitress kullanıyoruz (Broken Pipe hatasını çözer)
     logger.info(f"Sunucu {port} portunda başlatılıyor...")
     serve(flask_app, host="0.0.0.0", port=port, threads=4)
